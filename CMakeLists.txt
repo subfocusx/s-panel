@@ -56,10 +56,20 @@ target_include_directories(test_resolve PRIVATE src/dll)
 target_compile_definitions(test_resolve PRIVATE UNICODE _UNICODE WIN32_LEAN_AND_MEAN)
 target_link_libraries(test_resolve PRIVATE version)
 
+add_executable(readtext tools/readtext.cpp src/dll/resolve.cpp)
+target_include_directories(readtext PRIVATE src/dll)
+target_compile_definitions(readtext PRIVATE UNICODE _UNICODE WIN32_LEAN_AND_MEAN)
+target_link_libraries(readtext PRIVATE version)
+
+add_executable(test_resolve_loaded tests/test_resolve_loaded.cpp src/dll/resolve.cpp)
+target_include_directories(test_resolve_loaded PRIVATE src/dll)
+target_compile_definitions(test_resolve_loaded PRIVATE UNICODE _UNICODE WIN32_LEAN_AND_MEAN)
+target_link_libraries(test_resolve_loaded PRIVATE version)
+
 set_target_properties(taskbar loader PROPERTIES
   RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin"
   LIBRARY_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin"
 )
-set_target_properties(test_config test_host symdump featcheck pdatascan callgraph probe test_resolve PROPERTIES
+set_target_properties(test_config test_host symdump featcheck pdatascan callgraph probe test_resolve test_resolve_loaded PROPERTIES
   RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin"
 )
