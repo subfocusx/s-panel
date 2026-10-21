@@ -1,6 +1,7 @@
 // hooks.cpp — Phase 1: GetFrameSize only (minimal blast radius).
 // Signature (from Windhawk mod 1.3.10): static double GetFrameSize(int).
 #include "resolve.h"
+#include "offsets.h"
 #include "../shared/config.h"
 #include "MinHook.h"
 #include <shellapi.h>
@@ -36,10 +37,19 @@ static bool IsVerticalTaskbarCached() {
     return g_vertCache != 0;
 }
 
+static volatile LONG g_hookCalls = 0;
+
 static double WINAPI GetFrameSize_Hook(int e) {
-    if (!IsVerticalTaskbarCached() && (e == 1 || e == 2))
-        return (double)g_cfg.taskbarHeight;
-    return GetFrameSize_Orig(e);
+    LONG n = InterlockedIncrement(&g_hookCalls);
+    bool vertical = IsVerticalTaskbarCached();
+    double ret;
+    if (!vertical && (e == 1 || e == 2))
+        ret = (double)g_cfg.taskbarHeight;
+    else
+        ret = GetFrameSize_Orig(e);
+    if (n == 1 || n % 500 == 0)
+        LogLine(L"GetFrameSize_Hook call=%ld e=%d vertical=%d ret=%f", n, e, vertical ? 1 : 0, ret);
+    return ret;
 }
 
 static bool IsRvaInText(const IMAGE_NT_HEADERS64* nt, DWORD rva) {
@@ -53,29 +63,54 @@ static bool IsRvaInText(const IMAGE_NT_HEADERS64* nt, DWORD rva) {
 }
 
 bool InstallHooks(HMODULE taskbarMod, const PanelConfig& cfg) {
-    if (kExpectedTextHash == 0) return false;
+    if (kExpectedTextHash == 0) {
+        LogLine(L"InstallHooks refused: kExpectedTextHash unset");
+        return false;
+    }
     g_cfg = cfg;
     auto base = (const uint8_t*)taskbarMod;
     auto dos = (const IMAGE_DOS_HEADER*)base;
     auto nt = (const IMAGE_NT_HEADERS64*)(base + dos->e_lfanew);
     size_t imgSize = nt->OptionalHeader.SizeOfImage;
+    LogLine(L"Taskbar.dll imageSize=0x%zx", imgSize);
     ResolvedAddrs r{};
-    if (!ResolveTaskbarAddrs(base, imgSize, true, &r)) return false;
-    if (r.imageHash != kExpectedTextHash) return false;
-    if (!IsRvaInText(nt, r.getFrameSizeRva)) return false;
-    if (MH_Initialize() != MH_OK) return false;
+    if (!ResolveTaskbarAddrs(base, imgSize, true, &r)) {
+        LogLine(L"ResolveTaskbarAddrs FAILED");
+        return false;
+    }
+    LogLine(L"ResolveTaskbarAddrs ok: frame=0x%lx icon=0x%lx metrics=0x%lx hash=0x%016llx",
+            r.getFrameSizeRva, r.getIconHeightRva, r.getMetricsRva,
+            (unsigned long long)r.imageHash);
+    if (r.imageHash != kExpectedTextHash) {
+        LogLine(L"hash mismatch: expected=0x%016llx got=0x%016llx",
+                (unsigned long long)kExpectedTextHash, (unsigned long long)r.imageHash);
+        return false;
+    }
+    LogLine(L"hash matches kExpectedTextHash");
+    bool inText = IsRvaInText(nt, r.getFrameSizeRva);
+    LogLine(L"IsRvaInText(frame=0x%lx)=%d", r.getFrameSizeRva, inText ? 1 : 0);
+    if (!inText) return false;
+    if (MH_Initialize() != MH_OK) {
+        LogLine(L"MH_Initialize FAILED");
+        return false;
+    }
+    LogLine(L"MH_Initialize ok");
     g_frameRva = r.getFrameSizeRva;
     void* target = (void*)(base + r.getFrameSizeRva);
     if (MH_CreateHook(target, GetFrameSize_Hook,
                       (void**)&GetFrameSize_Orig) != MH_OK) {
+        LogLine(L"MH_CreateHook FAILED target=%p", target);
         MH_Uninitialize();
         return false;
     }
+    LogLine(L"MH_CreateHook ok target=%p", target);
     if (MH_EnableHook(target) != MH_OK) {
+        LogLine(L"MH_EnableHook FAILED");
         MH_RemoveHook(target);
         MH_Uninitialize();
         return false;
     }
+    LogLine(L"MH_EnableHook ok");
     return true;
 }
 
@@ -89,4 +124,5 @@ void RemoveHooks() {
     }
     MH_Uninitialize();
     g_frameRva = 0;
+    LogLine(L"RemoveHooks done");
 }
