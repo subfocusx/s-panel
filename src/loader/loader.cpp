@@ -89,6 +89,59 @@ static bool Inject(DWORD pid, const std::wstring& dll) {
     return true;
 }
 
+static HMODULE FindRemoteModule(DWORD pid, const wchar_t* name) {
+    HMODULE found = nullptr;
+    HANDLE snap = CreateToolhelp32Snapshot(TH32CS_SNAPMODULE | TH32CS_SNAPMODULE32, pid);
+    if (snap == INVALID_HANDLE_VALUE) return nullptr;
+    MODULEENTRY32W me{};
+    me.dwSize = sizeof(me);
+    if (Module32FirstW(snap, &me)) {
+        do {
+            if (_wcsicmp(me.szModule, name) == 0) {
+                found = me.hModule;
+                break;
+            }
+        } while (Module32NextW(snap, &me));
+    }
+    CloseHandle(snap);
+    return found;
+}
+
+static bool Uninject(DWORD pid) {
+    HMODULE mod = FindRemoteModule(pid, L"taskbar.dll");
+    if (!mod) {
+        wprintf(L"taskbar.dll not loaded in explorer, nothing to do\n");
+        return true;
+    }
+    HANDLE h = OpenProcess(PROCESS_CREATE_THREAD | PROCESS_QUERY_INFORMATION |
+                               PROCESS_VM_OPERATION | PROCESS_VM_WRITE |
+                               PROCESS_VM_READ,
+                           FALSE, pid);
+    if (!h) {
+        wprintf(L"OpenProcess failed GLE=%lu\n", GetLastError());
+        return false;
+    }
+    auto* freeLib = (LPTHREAD_START_ROUTINE)GetProcAddress(
+        GetModuleHandleW(L"kernel32.dll"), "FreeLibrary");
+    HANDLE th = CreateRemoteThread(h, nullptr, 0, freeLib, mod, 0, nullptr);
+    if (!th) {
+        wprintf(L"CreateRemoteThread failed GLE=%lu\n", GetLastError());
+        CloseHandle(h);
+        return false;
+    }
+    WaitForSingleObject(th, 10000);
+    DWORD exitCode = 0;
+    GetExitCodeThread(th, &exitCode);
+    CloseHandle(th);
+    CloseHandle(h);
+    if (!exitCode) {
+        wprintf(L"FreeLibrary in explorer returned 0\n");
+        return false;
+    }
+    wprintf(L"taskbar.dll unloaded from explorer\n");
+    return true;
+}
+
 int wmain(int argc, wchar_t** argv) {
     std::wstring cmd = argc > 1 ? argv[1] : L"--check";
     DWORD pid = FindExplorerPid();
@@ -112,6 +165,17 @@ int wmain(int argc, wchar_t** argv) {
         }
         return Inject(pid, DllPathNextToExe()) ? 0 : 2;
     }
-    wprintf(L"TODO: --install/--uninstall in Task 5 (scheduler + FreeLibrary)\n");
+    if (cmd == L"--uninstall") {
+        if (!pid) {
+            wprintf(L"explorer.exe not found\n");
+            return 1;
+        }
+        if (!IsX64Process(pid)) {
+            wprintf(L"explorer is not x64, abort\n");
+            return 1;
+        }
+        return Uninject(pid) ? 0 : 2;
+    }
+    wprintf(L"--install is not implemented (автозапуск не настроен, это вручную)\n");
     return 3;
 }
