@@ -9,12 +9,6 @@ void RemoveHooks();
 
 static HMODULE g_hMod = nullptr;
 
-static void RefreshTaskbar() {
-    APPBARDATA abd{};
-    abd.cbSize = sizeof(abd);
-    SHAppBarMessage(ABM_GETTASKBARPOS, &abd);
-}
-
 static DWORD WINAPI InitThread(LPVOID) {
     wchar_t dllPath[MAX_PATH]{};
     GetModuleFileNameW(g_hMod, dllPath, MAX_PATH);
@@ -36,7 +30,6 @@ static DWORD WINAPI InitThread(LPVOID) {
     }
     bool ok = taskbar && InstallHooks(taskbar, cfg);
     LogLine(L"%s", ok ? L"GetFrameSize hook ON" : L"resolver refused, no-op");
-    if (ok) RefreshTaskbar();
     return 0;
 }
 

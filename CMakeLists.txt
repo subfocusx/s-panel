@@ -61,6 +61,9 @@ target_include_directories(readtext PRIVATE src/dll)
 target_compile_definitions(readtext PRIVATE UNICODE _UNICODE WIN32_LEAN_AND_MEAN)
 target_link_libraries(readtext PRIVATE version)
 
+add_executable(test_view_guid tests/test_view_guid.cpp)
+target_compile_definitions(test_view_guid PRIVATE UNICODE _UNICODE WIN32_LEAN_AND_MEAN)
+
 add_executable(test_resolve_loaded tests/test_resolve_loaded.cpp src/dll/resolve.cpp)
 target_include_directories(test_resolve_loaded PRIVATE src/dll)
 target_compile_definitions(test_resolve_loaded PRIVATE UNICODE _UNICODE WIN32_LEAN_AND_MEAN)
@@ -74,10 +77,13 @@ add_executable(pdbrva
 target_include_directories(pdbrva PRIVATE vendor/mspdbx/include)
 target_compile_definitions(pdbrva PRIVATE UNICODE _UNICODE WIN32_LEAN_AND_MEAN)
 
+add_executable(pdbcheck tools/pdbcheck.cpp)
+target_compile_definitions(pdbcheck PRIVATE UNICODE _UNICODE WIN32_LEAN_AND_MEAN)
+
 set_target_properties(taskbar loader PROPERTIES
   RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin"
   LIBRARY_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin"
 )
-set_target_properties(test_config test_host symdump featcheck pdatascan callgraph probe test_resolve test_resolve_loaded pdbrva PROPERTIES
+set_target_properties(test_config test_host symdump featcheck pdatascan callgraph probe test_resolve test_resolve_loaded test_view_guid pdbrva pdbcheck PROPERTIES
   RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin"
 )
