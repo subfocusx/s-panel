@@ -9,7 +9,7 @@
 // FNV-1a over Taskbar.dll .text for the single allowlisted build 10.0.26100.
 // 0 = not pinned -> hooks refused. MUST be set to the value confirmed on the
 // reference Taskbar.dll before shipping; it is intentionally left unset here.
-static constexpr uint64_t kExpectedTextHash = 0;
+static constexpr uint64_t kExpectedTextHash = 0xc7eded830e6b3b32ULL;
 
 static PanelConfig g_cfg;
 static DWORD g_frameRva = 0;
