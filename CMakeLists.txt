@@ -66,10 +66,18 @@ target_include_directories(test_resolve_loaded PRIVATE src/dll)
 target_compile_definitions(test_resolve_loaded PRIVATE UNICODE _UNICODE WIN32_LEAN_AND_MEAN)
 target_link_libraries(test_resolve_loaded PRIVATE version)
 
+add_executable(pdbrva
+  tools/pdbrva.cpp
+  vendor/mspdbx/src/PDB.cpp
+  vendor/mspdbx/src/PEUtility.cpp
+)
+target_include_directories(pdbrva PRIVATE vendor/mspdbx/include)
+target_compile_definitions(pdbrva PRIVATE UNICODE _UNICODE WIN32_LEAN_AND_MEAN)
+
 set_target_properties(taskbar loader PROPERTIES
   RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin"
   LIBRARY_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin"
 )
-set_target_properties(test_config test_host symdump featcheck pdatascan callgraph probe test_resolve test_resolve_loaded PROPERTIES
+set_target_properties(test_config test_host symdump featcheck pdatascan callgraph probe test_resolve test_resolve_loaded pdbrva PROPERTIES
   RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin"
 )
