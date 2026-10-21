@@ -4,12 +4,14 @@ project(s-panel LANGUAGES C CXX)
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_MSVC_RUNTIME_LIBRARY "MultiThreaded") # /MT, zero runtime deps
+add_compile_options(/utf-8) # исходники в UTF-8 (русские строки в UI)
 
 add_library(taskbar SHARED
   src/dll/dllmain.cpp
   src/dll/hooks.cpp
   src/dll/offsets.cpp
   src/dll/resolve.cpp
+  src/dll/trayui.cpp
   src/shared/config.cpp
   vendor/minhook/src/buffer.c
   vendor/minhook/src/hook.c

@@ -10,9 +10,18 @@
 
 ## Состояние
 
-**Хуки отключены.** Проверка хэша `.text` в `src/dll/hooks.cpp` (`kExpectedTextHash`) не подтверждена — значение `0`, и `InstallHooks` сразу возвращает `false`. Пока значение не будет снято с эталонного `Taskbar.dll` и вписано, DLL ничего не патчит.
+Хуки включены и проверены в `explorer.exe` (сборка 26100.8457):
 
-Резолвер ищет RVA функции по байтовой сигнатуре и принимает результат только при уникальном совпадении: несколько кандидатов = отказ, а не угадывание.
+- `TaskbarConfiguration::GetFrameSize` @ 0x7F4B0 — высота панели.
+- `TaskbarConfiguration::GetIconHeightInViewPixels` @ 0x1CA628 — размер иконок.
+- `TaskbarComponentHost::DefaultButtonWidth` @ 0x8BF640 — ширина кнопок.
+- `IconViewModel::OnSystemTrayFrameSizeChanged` @ 0x1E99FC — размер иконок трея.
+
+Проверка GUID/age PDB (`Taskbar.View.pdb` 0AE0E302E8E34BE29CC303A7A62ABCA7/1) +
+попадание RVA в `.text` перед установкой. Неподтверждённый символ = хук не ставится,
+остальные продолжают работать. Отступы между иконками (`TaskbarIconSpacing`,
+`TrayIconSpacing`) пока только хранятся в конфиге: gap задаётся XAML-привязками
+(`StackLayout::Spacing`), для них нужен рантайм-замер — следующий шаг.
 
 ## Как устроено
 
@@ -39,7 +48,12 @@ tests\run_tests.bat
 
 Сухие тесты: `test_config`, `test_host`, `test_resolve`, а также `loader.exe --check` (только чтение, без обращения к explorer).
 
-Доступные команды `loader.exe`: `--check`, `--inject`. `--install` и `--uninstall` ещё не реализованы.
+Доступные команды `loader.exe`: `--check`, `--inject`, `--uninstall`,
+`--install [--with-autostart]`, `--uninstall-task`. `--inject` не инжектит дважды,
+`--uninstall` сначала вызывает экспорт `SpanelUninstall` (снять хуки, погасить
+иконку), затем выгружает DLL циклом `FreeLibrary`. Чистый откат без перезапуска
+explorer. Краш-дампы explorer (если будут) — в каталоге `dumps` рядом с временными
+файлами (ключ `LocalDumps\explorer.exe` в реестре).
 
 ## Конфиг
 

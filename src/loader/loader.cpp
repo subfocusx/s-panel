@@ -3,6 +3,9 @@
 #include <windows.h>
 #include <tlhelp32.h>
 #include <cstdio>
+#include <cstring>
+#include <new>
+#include <shlobj.h>
 #include "../shared/config.h"
 
 static DWORD FindExplorerPid() {
@@ -89,7 +92,9 @@ static bool Inject(DWORD pid, const std::wstring& dll) {
     return true;
 }
 
-static HMODULE FindRemoteModule(DWORD pid, const wchar_t* name) {
+static HMODULE FindRemoteModule(DWORD pid, const std::wstring& dllPath) {
+    // Сравниваем по ПОЛНОМУ пути: имя taskbar.dll совпадает с системной
+    // C:\Windows\System32\Taskbar.dll, поиск по имени даёт ложные срабатывания.
     HMODULE found = nullptr;
     HANDLE snap = CreateToolhelp32Snapshot(TH32CS_SNAPMODULE | TH32CS_SNAPMODULE32, pid);
     if (snap == INVALID_HANDLE_VALUE) return nullptr;
@@ -97,7 +102,7 @@ static HMODULE FindRemoteModule(DWORD pid, const wchar_t* name) {
     me.dwSize = sizeof(me);
     if (Module32FirstW(snap, &me)) {
         do {
-            if (_wcsicmp(me.szModule, name) == 0) {
+            if (_wcsicmp(me.szExePath, dllPath.c_str()) == 0) {
                 found = me.hModule;
                 break;
             }
@@ -107,35 +112,136 @@ static HMODULE FindRemoteModule(DWORD pid, const wchar_t* name) {
     return found;
 }
 
-static bool Uninject(DWORD pid) {
-    HMODULE mod = FindRemoteModule(pid, L"taskbar.dll");
-    if (!mod) {
-        wprintf(L"taskbar.dll not loaded in explorer, nothing to do\n");
-        return true;
+static DWORD ExportRva(const wchar_t* dllFile, const char* name) {
+    HANDLE f = CreateFileW(dllFile, GENERIC_READ, FILE_SHARE_READ, nullptr, OPEN_EXISTING,
+                           FILE_ATTRIBUTE_NORMAL, nullptr);
+    if (f == INVALID_HANDLE_VALUE) return 0;
+    LARGE_INTEGER sz{};
+    DWORD rva = 0;
+    if (GetFileSizeEx(f, &sz) && sz.QuadPart > 0x1000 && sz.QuadPart < 64 * 1024 * 1024) {
+        size_t n = (size_t)sz.QuadPart;
+        uint8_t* img = new (std::nothrow) uint8_t[n];
+        DWORD rd = 0;
+        if (img && ReadFile(f, img, (DWORD)n, &rd, nullptr) && rd == n) {
+            auto dos = (IMAGE_DOS_HEADER*)img;
+            if (dos->e_magic == IMAGE_DOS_SIGNATURE) {
+                auto nt = (IMAGE_NT_HEADERS64*)(img + dos->e_lfanew);
+                if (nt->Signature == IMAGE_NT_SIGNATURE) {
+                    auto& dir = nt->OptionalHeader.DataDirectory[IMAGE_DIRECTORY_ENTRY_EXPORT];
+                    if (dir.VirtualAddress && dir.Size) {
+                        // Найти raw-смещение таблицы экспорта через секции.
+                        auto secs = IMAGE_FIRST_SECTION(nt);
+                        DWORD expOff = 0;
+                        for (WORD i = 0; i < nt->FileHeader.NumberOfSections; i++) {
+                            DWORD va = secs[i].VirtualAddress;
+                            if (dir.VirtualAddress >= va &&
+                                dir.VirtualAddress < va + secs[i].Misc.VirtualSize) {
+                                expOff = secs[i].PointerToRawData + (dir.VirtualAddress - va);
+                                break;
+                            }
+                        }
+                        if (expOff) {
+                            auto exp = (IMAGE_EXPORT_DIRECTORY*)(img + expOff);
+                            auto rvaToOff = [&](DWORD v) -> DWORD {
+                                for (WORD i = 0; i < nt->FileHeader.NumberOfSections; i++) {
+                                    DWORD va = secs[i].VirtualAddress;
+                                    if (v >= va && v < va + secs[i].Misc.VirtualSize)
+                                        return secs[i].PointerToRawData + (v - va);
+                                }
+                                return 0;
+                            };
+                            DWORD namesOff = rvaToOff(exp->AddressOfNames);
+                            DWORD ordOff = rvaToOff(exp->AddressOfNameOrdinals);
+                            DWORD funcOff = rvaToOff(exp->AddressOfFunctions);
+                            if (namesOff && ordOff && funcOff) {
+                                auto names = (DWORD*)(img + namesOff);
+                                auto ords = (WORD*)(img + ordOff);
+                                auto funcs = (DWORD*)(img + funcOff);
+                                size_t wantLen = strlen(name);
+                                for (DWORD i = 0; i < exp->NumberOfNames; i++) {
+                                    DWORD no = rvaToOff(names[i]);
+                                    if (!no) continue;
+                                    const char* s = (const char*)(img + no);
+                                    if (strncmp(s, name, wantLen + 1) == 0) {
+                                        rva = funcs[ords[i]];
+                                        break;
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        delete[] img;
     }
+    CloseHandle(f);
+    return rva;
+}
+
+static bool RemoteCall(DWORD pid, void* addr, void* arg, DWORD timeoutMs, bool checkExit) {
     HANDLE h = OpenProcess(PROCESS_CREATE_THREAD | PROCESS_QUERY_INFORMATION |
-                               PROCESS_VM_OPERATION | PROCESS_VM_WRITE |
-                               PROCESS_VM_READ,
+                               PROCESS_VM_OPERATION | PROCESS_VM_WRITE | PROCESS_VM_READ,
                            FALSE, pid);
     if (!h) {
         wprintf(L"OpenProcess failed GLE=%lu\n", GetLastError());
         return false;
     }
-    auto* freeLib = (LPTHREAD_START_ROUTINE)GetProcAddress(
-        GetModuleHandleW(L"kernel32.dll"), "FreeLibrary");
-    HANDLE th = CreateRemoteThread(h, nullptr, 0, freeLib, mod, 0, nullptr);
+    HANDLE th = CreateRemoteThread(h, nullptr, 0, (LPTHREAD_START_ROUTINE)addr, arg, 0, nullptr);
     if (!th) {
         wprintf(L"CreateRemoteThread failed GLE=%lu\n", GetLastError());
         CloseHandle(h);
         return false;
     }
-    WaitForSingleObject(th, 10000);
+    DWORD w = WaitForSingleObject(th, timeoutMs);
     DWORD exitCode = 0;
     GetExitCodeThread(th, &exitCode);
     CloseHandle(th);
     CloseHandle(h);
-    if (!exitCode) {
-        wprintf(L"FreeLibrary in explorer returned 0\n");
+    if (w != WAIT_OBJECT_0) {
+        wprintf(L"remote call timed out\n");
+        return false;
+    }
+    // checkExit=false для void-функций (SpanelUninstall): важен факт завершения.
+    if (checkExit && (exitCode == 0 || exitCode == STILL_ACTIVE)) return false;
+    return true;
+}
+
+// Вызвать SpanelUninstall внутри explorer: снять хуки и остановить потоки DLL.
+static bool RemoteUninstall(DWORD pid, HMODULE remoteBase, const std::wstring& dllFile) {
+    DWORD rva = ExportRva(dllFile.c_str(), "SpanelUninstall");
+    if (!rva) {
+        wprintf(L"SpanelUninstall export not found (old build?), skip graceful stop\n");
+        return true; // не фатально: дальше FreeLibrary-цикл
+    }
+    void* addr = (uint8_t*)remoteBase + rva;
+    wprintf(L"calling SpanelUninstall at %p...\n", addr);
+    return RemoteCall(pid, addr, nullptr, 8000, false);
+}
+
+static bool Uninject(DWORD pid) {
+    HMODULE mod = FindRemoteModule(pid, DllPathNextToExe());
+    if (!mod) {
+        wprintf(L"taskbar.dll not loaded in explorer, nothing to do\n");
+        return true;
+    }
+    std::wstring dllFile = DllPathNextToExe();
+    if (!RemoteUninstall(pid, mod, dllFile)) {
+        wprintf(L"warning: SpanelUninstall call failed, trying FreeLibrary anyway\n");
+    }
+    auto* freeLib = (LPTHREAD_START_ROUTINE)GetProcAddress(GetModuleHandleW(L"kernel32.dll"),
+                                                          "FreeLibrary");
+    // Счётчик ссылок может быть >1 (повторный инжект старых сборок) — выгружаем до конца.
+    for (int i = 0; i < 3; i++) {
+        HMODULE cur = FindRemoteModule(pid, DllPathNextToExe());
+        if (!cur) break;
+        if (!RemoteCall(pid, (void*)freeLib, cur, 10000, true)) {
+            wprintf(L"FreeLibrary in explorer failed (try %d)\n", i + 1);
+            break;
+        }
+    }
+    if (FindRemoteModule(pid, DllPathNextToExe())) {
+        wprintf(L"taskbar.dll STILL loaded — restart explorer to fully unload\n");
         return false;
     }
     wprintf(L"taskbar.dll unloaded from explorer\n");
@@ -148,10 +254,17 @@ int wmain(int argc, wchar_t** argv) {
     if (cmd == L"--check") {
         wprintf(L"explorer pid=%lu x64=%d\n", pid, (int)IsX64Process(pid));
         wprintf(L"dll=%s\n", DllPathNextToExe().c_str());
+        std::wstring ini = DllPathNextToExe();
+        auto pos = ini.find_last_of(L"\\/");
+        ini = (pos == std::wstring::npos) ? L"config.ini" : ini.substr(0, pos + 1) + L"config.ini";
         PanelConfig c;
-        ReadPanelConfig(nullptr, &c);
-        wprintf(L"config default probe: height=%d icon=%d btn=%d tray=%d\n", c.taskbarHeight,
-                c.iconSize, c.taskbarButtonWidth, c.trayIconSize);
+        ReadPanelConfig(ini.c_str(), &c);
+        wprintf(L"config=%s\n", ini.c_str());
+        wprintf(L"  height=%d icon=%d btn=%d tray=%d taskbarSpacing=%d traySpacing=%d\n",
+                c.taskbarHeight, c.iconSize, c.taskbarButtonWidth, c.trayIconSize,
+                c.taskbarIconSpacing, c.trayIconSpacing);
+        wprintf(L"loaded in explorer: %s\n",
+                FindRemoteModule(pid, DllPathNextToExe()) ? L"yes" : L"no");
         return pid ? 0 : 1;
     }
     if (cmd == L"--inject") {
@@ -162,6 +275,10 @@ int wmain(int argc, wchar_t** argv) {
         if (!IsX64Process(pid)) {
             wprintf(L"explorer is not x64, abort\n");
             return 1;
+        }
+        if (FindRemoteModule(pid, DllPathNextToExe())) {
+            wprintf(L"taskbar.dll already loaded in explorer, skip inject\n");
+            return 0;
         }
         return Inject(pid, DllPathNextToExe()) ? 0 : 2;
     }
@@ -176,6 +293,52 @@ int wmain(int argc, wchar_t** argv) {
         }
         return Uninject(pid) ? 0 : 2;
     }
-    wprintf(L"--install is not implemented (автозапуск не настроен, это вручную)\n");
+    if (cmd == L"--install") {
+        bool withAutostart = (argc > 2 && std::wstring(argv[2]) == L"--with-autostart");
+        wchar_t appdata[MAX_PATH]{};
+        // SHGetFolderPathW из shell32 — отдельной линковки не требует (уже в умолчаниях).
+        if (FAILED(SHGetFolderPathW(nullptr, CSIDL_LOCAL_APPDATA, nullptr, 0, appdata))) {
+            wprintf(L"cannot resolve LOCALAPPDATA\n");
+            return 2;
+        }
+        std::wstring dir = std::wstring(appdata) + L"\\s-panel";
+        CreateDirectoryW(dir.c_str(), nullptr);
+        wchar_t exe[MAX_PATH]{};
+        GetModuleFileNameW(nullptr, exe, MAX_PATH);
+        std::wstring srcDir = exe;
+        auto p = srcDir.find_last_of(L"\\/");
+        srcDir = (p == std::wstring::npos) ? L"" : srcDir.substr(0, p + 1);
+        bool ok = CopyFileW((srcDir + L"taskbar.dll").c_str(), (dir + L"\\taskbar.dll").c_str(), FALSE) &&
+                  CopyFileW(exe, (dir + L"\\loader.exe").c_str(), FALSE);
+        if (!ok) {
+            wprintf(L"copy failed GLE=%lu\n", GetLastError());
+            return 2;
+        }
+        std::wstring ini = dir + L"\\config.ini";
+        if (GetFileAttributesW(ini.c_str()) == INVALID_FILE_ATTRIBUTES) {
+            PanelConfig dflt;
+            WritePanelConfig(ini.c_str(), dflt);
+        }
+        wprintf(L"installed to %s\n", dir.c_str());
+        std::wstring taskCmd = L"schtasks /Create /TN \"s-panel\" /SC ONLOGON /RL LIMITED /TR \"\\\"" +
+                               dir + L"\\loader.exe\\\" --inject\"";
+        wprintf(L"autostart command:\n  %s\n", taskCmd.c_str());
+        wprintf(L"(re-inject after explorer restart: same task with /SC MINUTE /MO 5)\n");
+        if (withAutostart) {
+            int rc = _wsystem(taskCmd.c_str());
+            wprintf(L"schtasks exit=%d\n", rc);
+            return rc == 0 ? 0 : 2;
+        }
+        wprintf(L"task NOT created (pass --with-autostart to create)\n");
+        return 0;
+    }
+    if (cmd == L"--uninstall-task") {
+        int rc = _wsystem(L"schtasks /Delete /TN \"s-panel\" /F");
+        wprintf(L"schtasks exit=%d\n", rc);
+        return rc == 0 ? 0 : 2;
+    }
+    wprintf(L"--install copies files to %%LOCALAPPDATA%%\\s-panel and prints the\n"
+            L"  scheduled-task command. Pass --install --with-autostart to create it.\n"
+            L"--uninstall-task removes the scheduled task.\n");
     return 3;
 }
