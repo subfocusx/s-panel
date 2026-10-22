@@ -55,6 +55,17 @@ int wmain() {
           d.taskbarButtonWidth == 28 && d.trayIconSize == 16 &&
           d.taskbarIconSpacing == 0 && d.trayIconSpacing == 0);
 
+    // Windows factory defaults (Reset target).
+    PanelConfig wf = WindowsDefaults();
+    CHECK(wf.taskbarHeight == 48 && wf.iconSize == 24 && wf.taskbarButtonWidth == 44 &&
+          wf.trayIconSize == 24 && wf.taskbarIconSpacing == 0 && wf.trayIconSpacing == 0);
+    for (int fld = 0; fld < kFieldCount; fld++) {
+        int lo = 0, hi2 = 0;
+        PanelFieldRange(fld, &lo, &hi2);
+        int v = PanelFieldValue(wf, fld);
+        CHECK(v >= lo && v <= hi2); // factory values must survive clamping
+    }
+
     // Field accessors agree with keys (6 fields).
     for (int fld = 0; fld < kFieldCount; fld++) {
         const wchar_t* key = PanelFieldKey(fld);

@@ -25,6 +25,9 @@ struct PanelConfig {
 bool ReadPanelConfig(const wchar_t* iniPath, PanelConfig* out);
 std::wstring DefaultIniPath(void* hModuleOrNull);
 
+// Заводские значения Windows 11 (48/24/44/24, отступы 0) — цель кнопки Reset.
+PanelConfig WindowsDefaults();
+
 // Ключ ini для поля (nullptr при неверном индексе).
 const wchar_t* PanelFieldKey(int field);
 

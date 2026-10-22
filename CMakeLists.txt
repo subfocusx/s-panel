@@ -11,7 +11,6 @@ add_library(taskbar SHARED
   src/dll/hooks.cpp
   src/dll/offsets.cpp
   src/dll/resolve.cpp
-  src/dll/trayui.cpp
   src/shared/config.cpp
   vendor/minhook/src/buffer.c
   vendor/minhook/src/hook.c
@@ -21,13 +20,18 @@ add_library(taskbar SHARED
 target_include_directories(taskbar PRIVATE
   vendor/minhook/include
   src/shared
+  "C:/Program Files (x86)/Windows Kits/10/Include/10.0.26100.0/cppwinrt"
 )
-target_link_libraries(taskbar PRIVATE ole32 oleaut32 runtimeobject shcore version)
+target_compile_options(taskbar PRIVATE /Zc:__cplusplus)
+target_link_libraries(taskbar PRIVATE ole32 oleaut32 runtimeobject shcore version psapi)
+target_link_options(taskbar PRIVATE "/MAP:${CMAKE_BINARY_DIR}/bin/taskbar.map")
 target_compile_definitions(taskbar PRIVATE UNICODE _UNICODE WIN32_LEAN_AND_MEAN)
 
-add_executable(loader src/loader/loader.cpp src/shared/config.cpp)
-target_include_directories(loader PRIVATE src/shared)
+add_executable(loader src/loader/loader.cpp src/shared/config.cpp src/dll/trayui.cpp
+  src/dll/offsets.cpp)
+target_include_directories(loader PRIVATE src/shared src/dll vendor/minhook/include)
 target_compile_definitions(loader PRIVATE UNICODE _UNICODE WIN32_LEAN_AND_MEAN)
+target_link_libraries(loader PRIVATE shell32 user32 gdi32)
 
 add_executable(test_config tests/test_config.cpp src/shared/config.cpp)
 target_include_directories(test_config PRIVATE src/shared)
@@ -71,6 +75,21 @@ target_include_directories(test_resolve_loaded PRIVATE src/dll)
 target_compile_definitions(test_resolve_loaded PRIVATE UNICODE _UNICODE WIN32_LEAN_AND_MEAN)
 target_link_libraries(test_resolve_loaded PRIVATE version)
 
+add_executable(test_hooktargets tests/test_hooktargets.cpp)
+target_include_directories(test_hooktargets PRIVATE src/shared)
+target_compile_definitions(test_hooktargets PRIVATE UNICODE _UNICODE WIN32_LEAN_AND_MEAN)
+
+add_executable(cfgmark tools/cfgmark.cpp)
+target_compile_definitions(cfgmark PRIVATE UNICODE _UNICODE WIN32_LEAN_AND_MEAN)
+target_compile_options(cfgmark PRIVATE /guard:cf)
+target_link_options(cfgmark PRIVATE /guard:cf)
+
+add_executable(mdstack tools/mdstack.cpp)
+target_compile_definitions(mdstack PRIVATE UNICODE _UNICODE WIN32_LEAN_AND_MEAN)
+target_link_libraries(mdstack PRIVATE dbghelp)
+target_include_directories(test_hooktargets PRIVATE src/shared)
+target_compile_definitions(test_hooktargets PRIVATE UNICODE _UNICODE WIN32_LEAN_AND_MEAN)
+
 add_executable(pdbrva
   tools/pdbrva.cpp
   vendor/mspdbx/src/PDB.cpp
@@ -86,6 +105,6 @@ set_target_properties(taskbar loader PROPERTIES
   RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin"
   LIBRARY_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin"
 )
-set_target_properties(test_config test_host symdump featcheck pdatascan callgraph probe test_resolve test_resolve_loaded test_view_guid pdbrva pdbcheck PROPERTIES
+set_target_properties(test_config test_host symdump featcheck pdatascan callgraph probe test_resolve test_resolve_loaded test_view_guid pdbrva pdbcheck test_hooktargets cfgmark mdstack PROPERTIES
   RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin"
 )

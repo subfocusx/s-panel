@@ -24,6 +24,13 @@ if errorlevel 1 (
   goto :fail
 )
 
+echo --- test_hooktargets ---
+"%BIN%\test_hooktargets.exe"
+if errorlevel 1 (
+  echo FAILED: test_hooktargets ^(errorlevel %errorlevel%^)
+  goto :fail
+)
+
 echo --- loader --check ---
 "%BIN%\loader.exe" --check
 if errorlevel 1 (

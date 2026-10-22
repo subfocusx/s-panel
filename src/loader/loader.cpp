@@ -7,6 +7,8 @@
 #include <new>
 #include <shlobj.h>
 #include "../shared/config.h"
+#include "../dll/trayui.h"
+#include "../dll/offsets.h"
 
 static DWORD FindExplorerPid() {
     DWORD pid = 0;
@@ -92,8 +94,7 @@ static bool Inject(DWORD pid, const std::wstring& dll) {
     return true;
 }
 
-static HMODULE FindRemoteModule(DWORD pid, const std::wstring& dllPath) {
-    // Сравниваем по ПОЛНОМУ пути: имя taskbar.dll совпадает с системной
+static HMODULE FindRemoteModule(DWORD pid, const std::wstring& dllPath) {    // Сравниваем по ПОЛНОМУ пути: имя taskbar.dll совпадает с системной
     // C:\Windows\System32\Taskbar.dll, поиск по имени даёт ложные срабатывания.
     HMODULE found = nullptr;
     HANDLE snap = CreateToolhelp32Snapshot(TH32CS_SNAPMODULE | TH32CS_SNAPMODULE32, pid);
@@ -248,6 +249,42 @@ static bool Uninject(DWORD pid) {
     return true;
 }
 
+static HANDLE g_trayExit = nullptr;
+
+static BOOL WINAPI TrayCtrlHandler(DWORD type) {
+    if ((type == CTRL_C_EVENT || type == CTRL_CLOSE_EVENT || type == CTRL_SHUTDOWN_EVENT) &&
+        g_trayExit) {
+        SetEvent(g_trayExit);
+        return TRUE;
+    }
+    return FALSE;
+}
+
+// Постоянный режим: иконка в трее + попап настроек. Пишет config.ini,
+// DLL в explorer подхватывает изменения вотчером (applyFn=null — применение
+// идёт через файл, а не прямым вызовом).
+static int RunTray() {
+    wchar_t exe[MAX_PATH]{};
+    GetModuleFileNameW(nullptr, exe, MAX_PATH);
+    std::wstring ini = exe;
+    auto pos = ini.find_last_of(L"\\/");
+    ini = (pos == std::wstring::npos) ? L"config.ini" : ini.substr(0, pos + 1) + L"config.ini";
+    if (GetFileAttributesW(ini.c_str()) == INVALID_FILE_ATTRIBUTES) {
+        PanelConfig dflt;
+        WritePanelConfig(ini.c_str(), dflt);
+    }
+    if (!TrayUiStart(ini.c_str(), nullptr)) {
+        wprintf(L"TrayUiStart failed\n");
+        return 2;
+    }
+    wprintf(L"s-panel tray running (config=%s). Ctrl+C to stop.\n", ini.c_str());
+    g_trayExit = CreateEventW(nullptr, TRUE, FALSE, nullptr);
+    SetConsoleCtrlHandler(TrayCtrlHandler, TRUE);
+    WaitForSingleObject(g_trayExit, INFINITE);
+    TrayUiStop();
+    return 0;
+}
+
 int wmain(int argc, wchar_t** argv) {
     std::wstring cmd = argc > 1 ? argv[1] : L"--check";
     DWORD pid = FindExplorerPid();
@@ -321,9 +358,9 @@ int wmain(int argc, wchar_t** argv) {
         }
         wprintf(L"installed to %s\n", dir.c_str());
         std::wstring taskCmd = L"schtasks /Create /TN \"s-panel\" /SC ONLOGON /RL LIMITED /TR \"\\\"" +
-                               dir + L"\\loader.exe\\\" --inject\"";
+                               dir + L"\\loader.exe\\\" --inject-and-tray\"";
         wprintf(L"autostart command:\n  %s\n", taskCmd.c_str());
-        wprintf(L"(re-inject after explorer restart: same task with /SC MINUTE /MO 5)\n");
+        wprintf(L"(--inject-and-tray: injects the DLL, then keeps the tray icon alive)\n");
         if (withAutostart) {
             int rc = _wsystem(taskCmd.c_str());
             wprintf(L"schtasks exit=%d\n", rc);
@@ -337,8 +374,45 @@ int wmain(int argc, wchar_t** argv) {
         wprintf(L"schtasks exit=%d\n", rc);
         return rc == 0 ? 0 : 2;
     }
-    wprintf(L"--install copies files to %%LOCALAPPDATA%%\\s-panel and prints the\n"
-            L"  scheduled-task command. Pass --install --with-autostart to create it.\n"
-            L"--uninstall-task removes the scheduled task.\n");
+    if (cmd == L"--probe") {
+        if (!pid) {
+            wprintf(L"explorer.exe not found\n");
+            return 1;
+        }
+        HMODULE mod = FindRemoteModule(pid, DllPathNextToExe());
+        if (!mod) {
+            wprintf(L"taskbar.dll not loaded in explorer\n");
+            return 2;
+        }
+        DWORD rva = ExportRva(DllPathNextToExe().c_str(), "SpanelCfgProbe");
+        if (!rva) {
+            wprintf(L"SpanelCfgProbe export not found\n");
+            return 2;
+        }
+        wprintf(L"calling SpanelCfgProbe...\n");
+        return RemoteCall(pid, (uint8_t*)mod + rva, nullptr, 8000, false) ? 0 : 2;
+    }
+    if (cmd == L"--tray") {
+        return RunTray();
+    }
+    if (cmd == L"--inject-and-tray") {
+        if (!pid) {
+            wprintf(L"explorer.exe not found\n");
+            return 1;
+        }
+        if (!IsX64Process(pid)) {
+            wprintf(L"explorer is not x64, abort\n");
+            return 1;
+        }
+        if (!FindRemoteModule(pid, DllPathNextToExe())) {
+            if (!Inject(pid, DllPathNextToExe())) return 2;
+        } else {
+            wprintf(L"taskbar.dll already loaded in explorer, skip inject\n");
+        }
+        return RunTray();
+    }
+    wprintf(L"commands: --check --inject --uninstall --probe\n"
+            L"          --tray (tray icon only) --inject-and-tray\n"
+            L"          --install [--with-autostart] --uninstall-task\n");
     return 3;
 }

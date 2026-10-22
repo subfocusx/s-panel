@@ -19,6 +19,17 @@ std::wstring UserConfigPath() {
     return std::wstring(appdata) + L"\\s-panel\\config.ini";
 }
 
+PanelConfig WindowsDefaults() {
+    PanelConfig c;
+    c.taskbarHeight = 48;
+    c.iconSize = 24;
+    c.taskbarButtonWidth = 44;
+    c.trayIconSize = 24;
+    c.taskbarIconSpacing = 0;
+    c.trayIconSpacing = 0;
+    return c;
+}
+
 const wchar_t* PanelFieldKey(int field) {
     switch (field) {
         case kFieldHeight: return L"TaskbarHeight";

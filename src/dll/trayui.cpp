@@ -202,8 +202,8 @@ static LRESULT CALLBACK PopupWndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) 
                     return 0;
                 }
             } else if (id == 2001 && code == BN_CLICKED) {
-                // Сброс.
-                g_tray.cfg = PanelConfig{};
+                // Reset: заводские значения Windows.
+                g_tray.cfg = WindowsDefaults();
                 WritePanelConfig(g_tray.cfgPath.c_str(), g_tray.cfg);
                 if (g_tray.applyFn) g_tray.applyFn(g_tray.cfg);
                 RefreshEdits();
@@ -253,6 +253,7 @@ static HWND MakeRow(HWND parent, int y, int field) {
 }
 
 static DWORD WINAPI TrayThread(LPVOID param) {
+    LogLine(L"TrayThread start");
     std::wstring* cfgPath = (std::wstring*)param;
     {
         // Копия пути под замком уже снята вызывающим; здесь забираем владение.
