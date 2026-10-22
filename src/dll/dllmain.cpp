@@ -40,6 +40,9 @@ static std::wstring ResolveConfigPath() {
     return local;
 }
 
+// Переприменение стиля трея (см. hooks.cpp).
+void HooksReapplyTrayStyles();
+
 static std::wstring CurrentConfigPath() {
     std::lock_guard<std::mutex> lock(g_pathLock);
     return g_configPath;
@@ -63,6 +66,7 @@ static DWORD WINAPI WatchThread(LPVOID) {
     LogLine(L"WatchThread start");
     std::wstring path = CurrentConfigPath();
     PanelConfig last{};
+    int tick = 0;
     ReadPanelConfig(path.c_str(), &last);
 
     for (;;) {
@@ -85,6 +89,9 @@ static DWORD WINAPI WatchThread(LPVOID) {
                        cfg.trayIconSize != last.trayIconSize ||
                        cfg.taskbarIconSpacing != last.taskbarIconSpacing ||
                        cfg.trayIconSpacing != last.trayIconSpacing;
+        // Раз в ~4 с переприменяем стиль трея: оболочка пересобирает область
+        // уведомлений и сбрасывает заданную ширину ячейки.
+        if (++tick % 16 == 0) HooksReapplyTrayStyles();
         if (changed) {
             LogLine(L"config changed on disk: h=%d icon=%d btn=%d tray=%d tsp=%d trsp=%d",
                     cfg.taskbarHeight, cfg.iconSize, cfg.taskbarButtonWidth, cfg.trayIconSize,
@@ -169,103 +176,4 @@ BOOL APIENTRY DllMain(HMODULE hModule, DWORD reason, LPVOID) {
         LogLine(L"DLL_PROCESS_DETACH");
     }
     return TRUE;
-}
-
-// Пустышка для V4-пробы (никем не вызывается).
-extern "C" void SpanelDummyTarget() {}
-
-// Временный диагностический экспорт: варианты маркировки CFG + статус CFG.
-// Удалить после выяснения причины GLE=87.
-extern "C" __declspec(dllexport) void __cdecl SpanelCfgProbe(void) {
-    LogLine(L"SpanelCfgProbe start");
-
-    PROCESS_MITIGATION_CONTROL_FLOW_GUARD_POLICY cfg{};
-    if (GetProcessMitigationPolicy(GetCurrentProcess(),
-                                    ProcessControlFlowGuardPolicy, &cfg, sizeof(cfg))) {
-        LogLine(L"CFG policy: Enable=%d Strict=%d Xfg=%d XfgAudit=%d",
-                (int)cfg.EnableControlFlowGuard, (int)cfg.StrictMode, (int)cfg.EnableXfg,
-                (int)cfg.EnableXfgAuditMode);
-    } else {
-        LogLine(L"GetProcessMitigationPolicy FAILED GLE=%lu", GetLastError());
-    }
-
-    typedef BOOL(WINAPI * Fn_t)(HANDLE, PVOID, SIZE_T, ULONG, PCFG_CALL_TARGET_INFO);
-    Fn_t fn = (Fn_t)GetProcAddress(GetModuleHandleW(L"kernelbase.dll"),
-                                   "SetProcessValidCallTargets");
-    if (!fn) {
-        LogLine(L"SpanelCfgProbe: no API");
-        return;
-    }
-
-    void* tramp = VirtualAlloc(nullptr, 4096, MEM_COMMIT | MEM_RESERVE,
-                               PAGE_EXECUTE_READWRITE);
-    LogLine(L"SpanelCfgProbe: test page=%p", tramp);
-    if (!tramp) {
-        LogLine(L"SpanelCfgProbe: VirtualAlloc FAILED GLE=%lu", GetLastError());
-        return;
-    }
-    uintptr_t page = (uintptr_t)tramp & ~(uintptr_t)0xFFF;
-    LogLine(L"tramp=%p page=%p", tramp, (void*)page);
-
-    MEMORY_BASIC_INFORMATION mbi{};
-    if (VirtualQuery(tramp, &mbi, sizeof(mbi)))
-        LogLine(L"tramp state=0x%lx protect=0x%lx type=0x%lx", mbi.State, mbi.Protect, mbi.Type);
-
-    // V1: одна страница, все 256 слотов.
-    CFG_CALL_TARGET_INFO full[256];
-    for (int i = 0; i < 256; i++) {
-        full[i].Offset = (ULONG_PTR)(i * 16);
-        full[i].Flags = CFG_CALL_TARGET_VALID;
-    }
-    SetLastError(0);
-    BOOL r = fn(GetCurrentProcess(), (PVOID)page, 4096, 256, full);
-    LogLine(L"V1 full-page: r=%d GLE=%lu", (int)r, GetLastError());
-
-    // V2: 16 байт вокруг трамплина, 1 слот.
-    uintptr_t slot = (uintptr_t)tramp & ~(uintptr_t)0xF;
-    CFG_CALL_TARGET_INFO one[1] = {{(ULONG_PTR)(slot - page), CFG_CALL_TARGET_VALID}};
-    SetLastError(0);
-    r = fn(GetCurrentProcess(), (PVOID)page, 4096, 1, one);
-    LogLine(L"V2 one-slot: r=%d GLE=%lu", (int)r, GetLastError());
-
-    // V3: VirtualProtect RWX + повтор V1.
-    DWORD old = 0;
-    if (VirtualProtect((void*)page, 4096, PAGE_EXECUTE_READWRITE, &old)) {
-        SetLastError(0);
-        r = fn(GetCurrentProcess(), (PVOID)page, 4096, 256, full);
-        LogLine(L"V3 after RWX: r=%d GLE=%lu", (int)r, GetLastError());
-    }
-    // V4: настоящий трамплин MinHook — создаём хук на пустышку, маркируем, снимаем.
-    // (Патч висит миллисекунды, пустышку никто не вызывает.)
-    extern void SpanelDummyTarget();
-    void* dummyOrig = nullptr;
-    if (MH_CreateHook((void*)SpanelDummyTarget, (void*)SpanelDummyTarget,
-                      &dummyOrig) == MH_OK &&
-        dummyOrig) {
-        uintptr_t dpage = (uintptr_t)dummyOrig & ~(uintptr_t)0xFFF;
-        MEMORY_BASIC_INFORMATION dmbi{};
-        if (VirtualQuery(dummyOrig, &dmbi, sizeof(dmbi)))
-            LogLine(L"tramp state=0x%lx protect=0x%lx type=0x%lx", dmbi.State, dmbi.Protect,
-                    dmbi.Type);
-        CFG_CALL_TARGET_INFO dfull[256];
-        for (int i = 0; i < 256; i++) {
-            dfull[i].Offset = (ULONG_PTR)(i * 16);
-            dfull[i].Flags = CFG_CALL_TARGET_VALID;
-        }
-        SetLastError(0);
-        r = fn(GetCurrentProcess(), (PVOID)dpage, 4096, 256, dfull);
-        LogLine(L"V4 real trampoline: r=%d GLE=%lu", (int)r, GetLastError());
-        MH_RemoveHook((void*)SpanelDummyTarget);
-    } else {
-        LogLine(L"V4: MH_CreateHook failed");
-    }
-    LogLine(L"SpanelCfgProbe done");
-}
-
-// Экспорт для отката: loader.exe --uninstall вызывает его удалённо.
-extern "C" __declspec(dllexport) void __cdecl SpanelUninstall(void) {
-    LogLine(L"SpanelUninstall called");
-    StopWatcher();
-    RemoveHooks();
-    LogLine(L"SpanelUninstall done");
 }

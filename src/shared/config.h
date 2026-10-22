@@ -16,7 +16,7 @@ struct PanelConfig {
     int taskbarHeight = 34;      // default Win11: 48
     int iconSize = 16;           // default Win11: 24
     int taskbarButtonWidth = 28; // default Win11: 44
-    int trayIconSize = 16;       // default Win11: 24 (tray, separate)
+    int trayIconSize = 32;       // ширина ячейки иконки трея, default Win11: 32
     int taskbarIconSpacing = 0;  // доп. отступ между иконками панели, px
     int trayIconSpacing = 0;     // доп. отступ между иконками трея, px
 };
@@ -25,7 +25,7 @@ struct PanelConfig {
 bool ReadPanelConfig(const wchar_t* iniPath, PanelConfig* out);
 std::wstring DefaultIniPath(void* hModuleOrNull);
 
-// Заводские значения Windows 11 (48/24/44/24, отступы 0) — цель кнопки Reset.
+// Заводские значения Windows 11 (48/24/44/32, отступы 0) — цель кнопки Reset.
 PanelConfig WindowsDefaults();
 
 // Ключ ini для поля (nullptr при неверном индексе).

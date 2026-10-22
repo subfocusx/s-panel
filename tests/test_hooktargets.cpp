@@ -24,16 +24,20 @@ struct Target {
     DWORD rva;
 };
 
+// Полный список целей хуков из hooks.cpp (Taskbar.View.dll).
 static const Target kTargets[] = {
     {"GetFrameSize", 0x7F4B0},
+    {"GetTrayFrameSize", 0x26CE2C},
     {"GetIconHeightInViewPixels", 0x1CA628},
-    {"DefaultButtonWidth", 0x8BF640},
-    {"get_DefaultButtonWidth", 0x8BFF90},
-    {"put_IconHeight", 0x21392C},
-    {"put_GlyphFontSizeVM", 0x3B7140},
-    {"put_GlyphFontSizeContent", 0x3DCA40},
+    {"GetIconHeightMethod", 0x280BD4},
+    {"ResourceLookup", 0x98970},
+    {"GetMetrics", 0x37F3D8},
+    {"IsStorageRecreationRequired", 0x914D0},
     {"UpdateButtonPadding", 0x376AFC},
     {"UpdateIconColumnDefinition", 0x376DF4},
+    {"UpdateVisualStates", 0x13E54},
+    {"IconViewCtor", 0xB6A50},
+    {"NotifyIconViewCtor", 0x2DE748},
 };
 
 // Pinned build: Taskbar.View.dll PDB identity (must match hooks.cpp kViewGuid/kViewAge).

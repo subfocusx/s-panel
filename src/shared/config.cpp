@@ -24,7 +24,7 @@ PanelConfig WindowsDefaults() {
     c.taskbarHeight = 48;
     c.iconSize = 24;
     c.taskbarButtonWidth = 44;
-    c.trayIconSize = 24;
+    c.trayIconSize = 32;
     c.taskbarIconSpacing = 0;
     c.trayIconSpacing = 0;
     return c;
@@ -48,7 +48,7 @@ void PanelFieldRange(int field, int* minValue, int* maxValue) {
         case kFieldHeight: lo = 24; hi = 72; break;
         case kFieldIconSize: lo = 12; hi = 48; break;
         case kFieldButtonWidth: lo = 20; hi = 120; break;
-        case kFieldTrayIconSize: lo = 12; hi = 48; break;
+        case kFieldTrayIconSize: lo = 16; hi = 48; break;
         case kFieldTaskbarSpacing: lo = 0; hi = 32; break;
         case kFieldTraySpacing: lo = 0; hi = 32; break;
         default: break;

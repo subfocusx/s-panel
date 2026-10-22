@@ -52,13 +52,13 @@ int wmain() {
     PanelConfig d;
     CHECK(ReadPanelConfig(L"C:\\nonexistent\\s-panel.ini", &d));
     CHECK(d.taskbarHeight == 34 && d.iconSize == 16 &&
-          d.taskbarButtonWidth == 28 && d.trayIconSize == 16 &&
+          d.taskbarButtonWidth == 28 && d.trayIconSize == 32 &&
           d.taskbarIconSpacing == 0 && d.trayIconSpacing == 0);
 
     // Windows factory defaults (Reset target).
     PanelConfig wf = WindowsDefaults();
     CHECK(wf.taskbarHeight == 48 && wf.iconSize == 24 && wf.taskbarButtonWidth == 44 &&
-          wf.trayIconSize == 24 && wf.taskbarIconSpacing == 0 && wf.trayIconSpacing == 0);
+          wf.trayIconSize == 32 && wf.taskbarIconSpacing == 0 && wf.trayIconSpacing == 0);
     for (int fld = 0; fld < kFieldCount; fld++) {
         int lo = 0, hi2 = 0;
         PanelFieldRange(fld, &lo, &hi2);
@@ -88,7 +88,7 @@ int wmain() {
     PanelFieldSet(&w, kFieldHeight, 24);
     PanelFieldSet(&w, kFieldIconSize, 48);
     PanelFieldSet(&w, kFieldButtonWidth, 120);
-    PanelFieldSet(&w, kFieldTrayIconSize, 12);
+    PanelFieldSet(&w, kFieldTrayIconSize, 16);
     PanelFieldSet(&w, kFieldTaskbarSpacing, 7);
     PanelFieldSet(&w, kFieldTraySpacing, 32);
     std::wstring written = WritePanelConfig(tmp, w);
@@ -96,7 +96,7 @@ int wmain() {
     PanelConfig r;
     CHECK(ReadPanelConfig(tmp, &r));
     CHECK(r.taskbarHeight == 24 && r.iconSize == 48 && r.taskbarButtonWidth == 120 &&
-          r.trayIconSize == 12 && r.taskbarIconSpacing == 7 && r.trayIconSpacing == 32);
+          r.trayIconSize == 16 && r.taskbarIconSpacing == 7 && r.trayIconSpacing == 32);
     DeleteFileW(tmp);
 
     if (!g_fail) printf("config tests PASS\n");

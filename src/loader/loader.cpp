@@ -374,24 +374,7 @@ int wmain(int argc, wchar_t** argv) {
         wprintf(L"schtasks exit=%d\n", rc);
         return rc == 0 ? 0 : 2;
     }
-    if (cmd == L"--probe") {
-        if (!pid) {
-            wprintf(L"explorer.exe not found\n");
-            return 1;
-        }
-        HMODULE mod = FindRemoteModule(pid, DllPathNextToExe());
-        if (!mod) {
-            wprintf(L"taskbar.dll not loaded in explorer\n");
-            return 2;
-        }
-        DWORD rva = ExportRva(DllPathNextToExe().c_str(), "SpanelCfgProbe");
-        if (!rva) {
-            wprintf(L"SpanelCfgProbe export not found\n");
-            return 2;
-        }
-        wprintf(L"calling SpanelCfgProbe...\n");
-        return RemoteCall(pid, (uint8_t*)mod + rva, nullptr, 8000, false) ? 0 : 2;
-    }
+
     if (cmd == L"--tray") {
         return RunTray();
     }
@@ -411,7 +394,7 @@ int wmain(int argc, wchar_t** argv) {
         }
         return RunTray();
     }
-    wprintf(L"commands: --check --inject --uninstall --probe\n"
+    wprintf(L"commands: --check --inject --uninstall\n"
             L"          --tray (tray icon only) --inject-and-tray\n"
             L"          --install [--with-autostart] --uninstall-task\n");
     return 3;

@@ -24,7 +24,6 @@ target_include_directories(taskbar PRIVATE
 )
 target_compile_options(taskbar PRIVATE /Zc:__cplusplus)
 target_link_libraries(taskbar PRIVATE ole32 oleaut32 runtimeobject shcore version psapi)
-target_link_options(taskbar PRIVATE "/MAP:${CMAKE_BINARY_DIR}/bin/taskbar.map")
 target_compile_definitions(taskbar PRIVATE UNICODE _UNICODE WIN32_LEAN_AND_MEAN)
 
 add_executable(loader src/loader/loader.cpp src/shared/config.cpp src/dll/trayui.cpp
@@ -54,8 +53,6 @@ add_executable(callgraph tools/callgraph.cpp vendor/minhook/src/hde/hde64.c)
 target_include_directories(callgraph PRIVATE vendor/minhook/src/hde)
 target_compile_definitions(callgraph PRIVATE UNICODE _UNICODE WIN32_LEAN_AND_MEAN)
 
-add_executable(probe tools/probe.cpp)
-target_compile_definitions(probe PRIVATE UNICODE _UNICODE WIN32_LEAN_AND_MEAN)
 
 add_executable(test_resolve tests/test_resolve.cpp src/dll/resolve.cpp)
 target_include_directories(test_resolve PRIVATE src/dll)
@@ -79,16 +76,6 @@ add_executable(test_hooktargets tests/test_hooktargets.cpp)
 target_include_directories(test_hooktargets PRIVATE src/shared)
 target_compile_definitions(test_hooktargets PRIVATE UNICODE _UNICODE WIN32_LEAN_AND_MEAN)
 
-add_executable(cfgmark tools/cfgmark.cpp)
-target_compile_definitions(cfgmark PRIVATE UNICODE _UNICODE WIN32_LEAN_AND_MEAN)
-target_compile_options(cfgmark PRIVATE /guard:cf)
-target_link_options(cfgmark PRIVATE /guard:cf)
-
-add_executable(mdstack tools/mdstack.cpp)
-target_compile_definitions(mdstack PRIVATE UNICODE _UNICODE WIN32_LEAN_AND_MEAN)
-target_link_libraries(mdstack PRIVATE dbghelp)
-target_include_directories(test_hooktargets PRIVATE src/shared)
-target_compile_definitions(test_hooktargets PRIVATE UNICODE _UNICODE WIN32_LEAN_AND_MEAN)
 
 add_executable(pdbrva
   tools/pdbrva.cpp
@@ -105,6 +92,6 @@ set_target_properties(taskbar loader PROPERTIES
   RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin"
   LIBRARY_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin"
 )
-set_target_properties(test_config test_host symdump featcheck pdatascan callgraph probe test_resolve test_resolve_loaded test_view_guid pdbrva pdbcheck test_hooktargets cfgmark mdstack PROPERTIES
+set_target_properties(test_config test_host symdump featcheck pdatascan callgraph test_resolve test_resolve_loaded test_view_guid pdbrva pdbcheck test_hooktargets PROPERTIES
   RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin"
 )

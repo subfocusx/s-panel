@@ -1,33 +1,93 @@
-# s-panel — уменьшение высоты панели задач Windows 11
+# s-panel — компактная панель задач Windows 11
 
-Производная от Windhawk-мода `taskbar-icon-size` (m417z, GPLv3). Лицензия проекта — **GPLv3**, см. [LICENSE](LICENSE). MinHook в `vendor/` — BSD-2-Clause (`vendor/minhook/LICENSE.txt`).
+Производная от Windhawk-модов `taskbar-icon-size` и `taskbar-notification-icon-spacing`
+(m417z, GPLv3). Лицензия проекта — **GPLv3**, см. [LICENSE](LICENSE).
+MinHook в `vendor/` — BSD-2-Clause (`vendor/minhook/LICENSE.txt`).
 
 ## Что делает
 
-- Перехватывает одну функцию `TaskbarConfiguration::GetFrameSize` в `Taskbar.dll` и отдаёт заданную высоту панели (`taskbarHeight` из конфига).
-- Вертикальную панель (слева/справа) не трогает.
-- Только x64, только сборка Windows 10.0.26100 (24H2).
+Позволяет менять шесть параметров панели задач и трея без перезапуска explorer:
 
-## Состояние
+| Поле | Ключ ini | Смысл | Значение Win11 |
+|---|---|---|---|
+| Taskbar height | `TaskbarHeight` | высота панели задач, px | 48 |
+| Icon size | `IconSize` | размер иконок приложений, px | 24 |
+| Button width | `TaskbarButtonWidth` | ширина кнопки приложения, px | 44 |
+| Tray icons | `TrayIconSize` | ширина ячейки иконки трея, px | 32 |
+| Taskbar spacing | `TaskbarIconSpacing` | доп. отступ между иконками панели, px | 0 |
+| Tray spacing | `TrayIconSpacing` | доп. отступ между иконками трея, px | 0 |
 
-Хуки включены и проверены в `explorer.exe` (сборка 26100.8457):
+Правки применяются на лету: DLL следит за `config.ini` и пересобирает панель без
+перезапуска оболочки. Вертикальная панель (слева/справа) не трогается.
+Только x64, только сборка Windows 11 24H2 (10.0.26100).
 
-- `TaskbarConfiguration::GetFrameSize` @ 0x7F4B0 — высота панели.
-- `TaskbarConfiguration::GetIconHeightInViewPixels` @ 0x1CA628 — размер иконок.
-- `TaskbarComponentHost::DefaultButtonWidth` @ 0x8BF640 — ширина кнопок.
-- `IconViewModel::OnSystemTrayFrameSizeChanged` @ 0x1E99FC — размер иконок трея.
+### Как устроен трей
 
-Проверка GUID/age PDB (`Taskbar.View.pdb` 0AE0E302E8E34BE29CC303A7A62ABCA7/1) +
-попадание RVA в `.text` перед установкой. Неподтверждённый символ = хук не ставится,
-остальные продолжают работать. Отступы между иконками (`TaskbarIconSpacing`,
-`TrayIconSpacing`) пока только хранятся в конфиге: gap задаётся XAML-привязками
-(`StackLayout::Spacing`), для них нужен рантайм-замер — следующий шаг.
+Оболочка рисует область уведомлений в XAML-острове панели. Мы идём от корня
+острова (`XamlRoot.Content`) по дереву:
+
+```
+XamlRoot.Content
+  └─ SystemTray.SystemTrayFrame
+       └─ SystemTrayFrameGrid
+            └─ NotificationAreaIcons        (ItemsControl)
+                 └─ ItemsPresenter → StackPanel → … → SystemTray.NotifyIconView
+```
+
+Элементу иконки (`SystemTray.NotifyIconView`) задаётся `MinWidth` — это ширина
+ячейки; она же определяет расстояние между иконками трея. Внутренний `Padding`
+контента обнуляется, чтобы иконка занимала всю ячейку.
+
+Особенности сборки 24H2, на которые натыкается обход:
+
+- дети `ContentControl` не видны через `VisualTreeHelper` — содержимое берётся
+  через ABI `IContentControl::get_Content` (обычный `consume<>` даёт C3779);
+- `Padding` у `Grid` ставится через ABI `IGrid2::put_Padding` (по той же причине);
+- в мультимониторной системе панелей задач несколько — собираются **все** корни
+  XAML, стиль применяется в каждом;
+- корни XAML появляются не сразу: оболочка пересчитывает метрики панели только
+  при изменении высоты, поэтому при смене настроек высота на 1 px уменьшается и
+  возвращается обратно — это заставляет оболочку пересчитать метрики и отдать
+  нам корень дерева;
+- оболочка периодически пересобирает область уведомлений и сбрасывает `MinWidth`,
+  поэтому стиль переприменяется раз в ~4 с.
+
+## Хуки
+
+Все цели — в `Taskbar.View.dll` (сборка 26100.8457), список проверяется
+`tests\test_hooktargets.exe` (попадание RVA в `.text` + GUID/age PDB):
+
+| Символ | RVA | Назначение |
+|---|---|---|
+| `TaskbarConfiguration::GetFrameSize` | 0x7F4B0 | высота панели |
+| `TaskbarConfiguration::GetTrayFrameSize` | 0x26CE2C | размер области трея |
+| `TaskbarConfiguration::GetIconHeightInViewPixels` | 0x1CA628 | размер иконок |
+| `TaskbarConfiguration::GetIconHeightMethod` | 0x280BD4 | размер иконок (запасной путь) |
+| `ResourceLookup` | 0x98970 | ширина кнопки (`SmallTaskbarButtonExtent`) |
+| `TaskbarFrame::GetMetrics` | 0x37F3D8 | ширина кнопки + доступ к дереву XAML |
+| `TaskListButton::UpdateButtonPadding` | 0x376AFC | ресайз иконок панели |
+| `TaskListButton::UpdateIconColumnDefinition` | 0x376DF4 | ресайз иконок панели |
+| `TaskListButton::UpdateVisualStates` | 0x13E54 | ресайз иконок панели |
+| `IconView::IconView` | 0xB6A50 | конструктор иконки трея |
+| `NotifyIconView::NotifyIconView` | 0x2DE748 | конструктор иконки трея |
+
+Перед установкой проверяется GUID/age PDB (`Taskbar.View.pdb`
+`0AE0E302E8E34BE29CC303A7A62ABCA7/1`). Несовпадение = хуки не ставятся,
+инжект остаётся no-op.
+
+Хуки конструкторов иконок трея в 24H2 не вызываются (оболочка переиспользует
+элементы), поэтому рабочий путь — обход дерева XAML; хуки оставлены для других
+сборок.
 
 ## Как устроено
 
 - `taskbar.dll` (MinHook, `/MT`) загружается **внутрь `explorer.exe`**.
-- `loader.exe` инжектит DLL через `CreateRemoteThread + LoadLibraryW` в `explorer.exe` и завершается.
-- Конфиг `config.ini` лежит рядом с DLL. Шаблон — `config.example.ini`.
+- `loader.exe` инжектит DLL через `CreateRemoteThread + LoadLibraryW` в
+  `explorer.exe` и завершается.
+- Иконка и всплывающая панель настроек живут в `loader.exe` (`--tray`), а не в
+  оболочке: окна и GDI в процессе explorer периодически роняли её.
+- Связь панели настроек с DLL — через `config.ini`: DLL следит за файлом.
+- Конфиг `config.ini` лежит рядом с DLL, шаблон — `config.example.ini`.
 
 ## Сборка
 
@@ -43,25 +103,44 @@ build.bat [--clean]
 ## Тесты
 
 ```
-tests\run_tests.bat
+tests\run_tests.bat            # сухие тесты, без обращения к explorer
+tests\run_tests.bat --live     # + живой тест трея (нужна загруженная DLL)
 ```
 
-Сухие тесты: `test_config`, `test_host`, `test_resolve`, а также `loader.exe --check` (только чтение, без обращения к explorer).
+Сухие: `test_config`, `test_host`, `test_resolve`, `test_hooktargets`,
+`loader.exe --check` (только чтение).
 
-Доступные команды `loader.exe`: `--check`, `--inject`, `--uninstall`,
-`--install [--with-autostart]`, `--uninstall-task`. `--inject` не инжектит дважды,
-`--uninstall` сначала вызывает экспорт `SpanelUninstall` (снять хуки, погасить
-иконку), затем выгружает DLL циклом `FreeLibrary`. Чистый откат без перезапуска
-explorer. Краш-дампы explorer (если будут) — в каталоге `dumps` рядом с временными
-файлами (ключ `LocalDumps\explorer.exe` в реестре).
+Живой тест (`tools\auto_test.ps1`): меняет `TrayIconSize` в конфиге, снимает
+область уведомлений до и после и проверяет, что расстояние между иконками
+выросло; конфиг восстанавливается в любом случае.
+
+Команды `loader.exe`: `--check`, `--inject`, `--uninstall`, `--tray`,
+`--inject-and-tray`, `--install [--with-autostart]`, `--uninstall-task`.
+`--inject` не инжектит дважды; `--uninstall` сначала вызывает экспорт
+`SpanelUninstall` (снять хуки), затем выгружает DLL циклом `FreeLibrary`.
+
+### Автозапуск
+
+```
+loader.exe --install --with-autostart
+```
+
+Создаёт задачу планировщика `s-panel` (запуск при входе в систему).
+Удаление: `loader.exe --uninstall-task`. Задача намеренно не создаётся
+автоматически — только по явной команде.
 
 ## Конфиг
 
-Скопируй `config.example.ini` → `config.ini` рядом с DLL. Значения по умолчанию: `34 / 16 / 28` (стандартный Win11: `48 / 24 / 44`).
+Скопируй `config.example.ini` → `config.ini` рядом с DLL. Значения по умолчанию
+в структуре — `34 / 16 / 28 / 32` (стандартный Win11: `48 / 24 / 44 / 32`),
+кнопка Reset в панели возвращает заводские `48 / 24 / 44 / 32`.
 
 ## Риски
 
-- **Инжект в `explorer.exe`.** Ошибка в хуке может уронить оболочку Windows. Откат через `loader.exe --uninstall` пока не реализован (заглушка до Task 5); для отката перезапусти `explorer.exe`.
-- **SmartScreen и антивирусы.** Инжектор и DLL без подписи кода часто помечаются как подозрительные — это ожидаемо.
-- **Обновления Windows.** После каждого KB-обновления офсеты и хэш `Taskbar.dll` могут измениться. Нужна повторная проверка и обновление сигнатуры/хэша; до этого хуки не работают.
+- **Инжект в `explorer.exe`.** Ошибка в хуке может уронить оболочку Windows.
+  Откат — `loader.exe --uninstall`, иначе перезапуск `explorer.exe`.
+- **SmartScreen и антивирусы.** Инжектор и DLL без подписи кода часто помечаются
+  как подозрительные — это ожидаемо.
+- **Обновления Windows.** После каждого KB-обновления офсеты и GUID/age PDB
+  могут измениться; до обновления таблицы хуки не ставятся (инжект — no-op).
 - **Не проверено:** потребление памяти и CPU внутри `explorer.exe` не измерялось.

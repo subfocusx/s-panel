@@ -31,6 +31,7 @@
 #include <cstring>
 #include <cstdint>
 #include <functional>
+#include <limits>
 #include <vector>
 
 static constexpr const char* kViewGuid = "0AE0E302E8E34BE29CC303A7A62ABCA7";
@@ -63,7 +64,9 @@ static constexpr DWORD kRvaTrayGetFrameSize = 0x26CE2C;
 static constexpr DWORD kRvaUpdateButtonPadding = 0x376AFC;
 static constexpr DWORD kRvaUpdateIconColumnDefinition = 0x376DF4;
 static constexpr DWORD kRvaUpdateVisualStates = 0x13E54;
-static constexpr DWORD kRvaIconViewCtor = 0x484A8;
+//   0xB6A50  winrt::SystemTray::implementation::IconView::IconView(void) (Taskbar.View)
+static constexpr DWORD kRvaIconViewCtor = 0xB6A50;
+static constexpr DWORD kRvaNotifyIconViewCtor = 0x2DE748;
 
 // Живые значения: читаются хуками из потока UI explorer, пишутся из вотчера.
 struct LiveValues {
@@ -115,18 +118,26 @@ static bool IsVerticalTaskbarCached() {
 // ---------------------------------------------------------------- хуки
 // ---------------------------------------------------------------- трей: стиль иконок
 //
-// Размер иконок трея в Win11 задаётся НЕ сеттером размера, а шириной ячейки:
-// NotifyIconView.MinWidth + обнуление Padding у контента (см. эталон-мод
-// taskbar-notification-icon-spacing v1.4). Отступ между иконками трея —
-// это дополнительные пиксели к MinWidth.
+// Механизм повторяет эталон-мод taskbar-notification-icon-spacing v1.4 (Windhawk):
+// ширина ячейки иконки трея задаётся NotifyIconView.MinWidth, а внутренний Padding
+// контента обнуляется. Отступ между иконками — дополнительные пиксели к MinWidth.
 //
-// Хук: конструктор IconView (Taskbar.View.dll) — в нём подписываемся на Loaded
-// и применяем стиль, когда элемент уже в дереве (дети появляются после загрузки).
+// Структура дерева трея (Win11 24H2):
+//   XamlRoot.Content -> SystemTray.SystemTrayFrame -> SystemTrayFrameGrid
+//     -> NotificationAreaIcons (ItemsControl)
+//        -> ItemsPresenter -> StackPanel -> ContentPresenter -> NotifyItemIcon
+// Элемент иконки: класс "SystemTray.NotifyIconView", имя "NotifyItemIcon".
+// Выполнить fn на UI-потоке панели задач (XAML-остров живёт там).
+static void RunOnTaskbarUiThread(void (*fn)(void*), void* param);
+
 using FrameworkElementPtr = winrt::Windows::UI::Xaml::FrameworkElement;
+
 static winrt::Windows::UI::Xaml::FrameworkElement FindChildByName(
     winrt::Windows::UI::Xaml::FrameworkElement parent, const wchar_t* name);
+static winrt::Windows::UI::Xaml::FrameworkElement FindChildByClassName(
+    winrt::Windows::UI::Xaml::FrameworkElement parent, const wchar_t* className);
 
-// Поиск по классу.
+// Поиск по классу среди прямых детей.
 static winrt::Windows::UI::Xaml::FrameworkElement FindChildByClassName(
     winrt::Windows::UI::Xaml::FrameworkElement parent, const wchar_t* className) {
     using namespace winrt::Windows::UI::Xaml::Media;
@@ -149,40 +160,49 @@ static winrt::Windows::UI::Xaml::FrameworkElement FindChildByClassName(
     return nullptr;
 }
 
-// Содержимое ContentControl (у элементов трея дети не видны через
-// VisualTreeHelper, но доступны через Content).
-// Через ABI: consume<> у ContentControl.Content не компилируется (C3779).
-static winrt::Windows::UI::Xaml::FrameworkElement GetContentChild(
-    winrt::Windows::UI::Xaml::FrameworkElement parent) {
-    try {
-        auto cc = parent.try_as<winrt::Windows::UI::Xaml::Controls::ContentControl>();
-        if (!cc) return nullptr;
-        using ABI = winrt::impl::abi<winrt::Windows::UI::Xaml::Controls::IContentControl>::type;
-        void* value = nullptr;
-        auto abi = *(ABI**)&cc;
-        if (FAILED(abi->get_Content(&value)) || !value) return nullptr;
-        winrt::Windows::Foundation::IInspectable obj{value, winrt::take_ownership_from_abi};
-        return obj.try_as<winrt::Windows::UI::Xaml::FrameworkElement>();
-    } catch (...) {
-    }
-    return nullptr;
-}
-
-// Рекурсивный поиск потомка по имени.
-static winrt::Windows::UI::Xaml::FrameworkElement FindDescendantByName(
-    winrt::Windows::UI::Xaml::FrameworkElement parent, const wchar_t* name) {
+// Первый прямой потомок, удовлетворяющий предикату.
+template <typename Pred>
+static FrameworkElementPtr FirstChildMatching(FrameworkElementPtr parent, Pred pred) {
     using namespace winrt::Windows::UI::Xaml::Media;
     int n = 0;
     try {
         n = VisualTreeHelper::GetChildrenCount(parent);
     } catch (...) {
-        n = 0;
+        return nullptr;
     }
     for (int i = 0; i < n; i++) {
-        winrt::Windows::UI::Xaml::FrameworkElement child = nullptr;
+        FrameworkElementPtr child = nullptr;
         try {
-            child = VisualTreeHelper::GetChild(parent, i)
-                        .try_as<winrt::Windows::UI::Xaml::FrameworkElement>();
+            child = VisualTreeHelper::GetChild(parent, i).try_as<FrameworkElementPtr>();
+        } catch (...) {
+            continue;
+        }
+        if (!child) continue;
+        bool match = false;
+        try {
+            match = pred(child);
+        } catch (...) {
+            continue;
+        }
+        if (match) return child;
+    }
+    return nullptr;
+}
+
+// Рекурсивный поиск потомка по имени — запасной путь, если структура изменится.
+static FrameworkElementPtr FindDescendantByName(FrameworkElementPtr parent,
+                                                 const wchar_t* name) {
+    using namespace winrt::Windows::UI::Xaml::Media;
+    int n = 0;
+    try {
+        n = VisualTreeHelper::GetChildrenCount(parent);
+    } catch (...) {
+        return nullptr;
+    }
+    for (int i = 0; i < n; i++) {
+        FrameworkElementPtr child = nullptr;
+        try {
+            child = VisualTreeHelper::GetChild(parent, i).try_as<FrameworkElementPtr>();
         } catch (...) {
             continue;
         }
@@ -194,26 +214,93 @@ static winrt::Windows::UI::Xaml::FrameworkElement FindDescendantByName(
         auto found = FindDescendantByName(child, name);
         if (found) return found;
     }
-    // Дети не видны — пробуем содержимое ContentControl.
-    auto content = GetContentChild(parent);
-    if (content) {
-        try {
-            if (content.Name() == name) return content;
-        } catch (...) {
+    return nullptr;
+}
+
+// Обнулить Padding у Grid. Через ABI: consume<Grid> с этим свойством не
+// компилируется в данном контексте (C3779), у IGrid2 ABI есть put_Padding.
+static bool SetGridPaddingZero(FrameworkElementPtr el) {
+    try {
+        using IGrid2ABI = winrt::impl::abi<winrt::Windows::UI::Xaml::Controls::IGrid2>::type;
+        using ThicknessABI = winrt::impl::abi<winrt::Windows::UI::Xaml::Thickness>::type;
+        auto ig2 = el.try_as<winrt::Windows::UI::Xaml::Controls::IGrid2>();
+        if (!ig2) return false;
+        auto abi = *(IGrid2ABI**)&ig2;
+        return SUCCEEDED(abi->put_Padding(ThicknessABI{}));
+    } catch (...) {
+    }
+    return false;
+}
+
+// Содержимое ContentControl. В 24H2 дети элементов трея не видны через
+// VisualTreeHelper — иконки лежат именно в Content. Через ABI: consume<>
+// у ContentControl.Content не компилируется (C3779).
+// Содержимое ContentControl. В 24H2 дети элементов трея не видны через
+// VisualTreeHelper — иконки лежат именно в Content. Через ABI: consume<>
+// у ContentControl.Content не компилируется (C3779).
+static winrt::hstring ClassNameOf(FrameworkElementPtr el) {
+    try {
+        return winrt::get_class_name(el);
+    } catch (...) {
+    }
+    return winrt::hstring();
+}
+
+static FrameworkElementPtr GetContentChild(FrameworkElementPtr parent) {
+
+    try {
+        using CCI = winrt::Windows::UI::Xaml::Controls::IContentControl;
+        using CCABI = winrt::impl::abi<CCI>::type;
+        auto cc = parent.try_as<CCI>();
+        if (!cc) {
+
+            return nullptr;
         }
-        auto found = FindDescendantByName(content, name);
-        if (found) return found;
+        void* value = nullptr;
+        auto abi = *(CCABI**)&cc;
+        HRESULT hr = abi->get_Content(&value);
+        if (FAILED(hr) || !value) {
+
+            return nullptr;
+        }
+        winrt::Windows::Foundation::IInspectable obj{value, winrt::take_ownership_from_abi};
+        auto el = obj.try_as<FrameworkElementPtr>();
+        if (!el) {
+
+            return nullptr;
+        }
+        return el;
+    } catch (...) {
     }
     return nullptr;
 }
+
 using LoadedRevoker = winrt::impl::event_revoker<
     winrt::Windows::UI::Xaml::IFrameworkElement,
     &winrt::impl::abi<winrt::Windows::UI::Xaml::IFrameworkElement>::type::remove_Loaded>;
 
 static std::vector<LoadedRevoker> g_trayRevokers;
 static std::vector<FrameworkElementPtr> g_trayViews;
-// Корень XAML панели (UI-поток): от него ищем область уведомлений.
-static winrt::Windows::UI::Xaml::XamlRoot g_taskbarXamlRoot{nullptr};
+// Острова XAML панелей (UI-поток). В мультимониторной системе панелей может
+// быть несколько, и в каждой свой трей — собираем все корни.
+static std::vector<winrt::Windows::UI::Xaml::XamlRoot> g_taskbarRoots;
+
+// Подняться от элемента к корню дерева XAML.
+static FrameworkElementPtr FindXamlRootElement(FrameworkElementPtr el) {
+    using namespace winrt::Windows::UI::Xaml::Media;
+    FrameworkElementPtr cur = el;
+    for (int i = 0; i < 32 && cur; i++) {
+        FrameworkElementPtr parent = nullptr;
+        try {
+            parent = VisualTreeHelper::GetParent(cur).try_as<FrameworkElementPtr>();
+        } catch (...) {
+            break;
+        }
+        if (!parent) break;
+        cur = parent;
+    }
+    return cur;
+}
 
 // Ширина ячейки трея: размер иконки + отступ.
 static int TrayCellWidth() {
@@ -259,94 +346,143 @@ static void DumpTrayIconTree(FrameworkElementPtr view, int depth) {
         } catch (...) {
         }
         DumpTrayIconTree(c, depth + 1);
+        // Содержимое ContentControl в 24H2 не видно в дереве.
+        auto content = GetContentChild(c);
+        if (content) {
+            try {
+                LogLine(L"  tray tree[%d]: content class=%s name=%s", depth,
+                        winrt::get_class_name(content).c_str(), content.Name().c_str());
+            } catch (...) {
+            }
+            DumpTrayIconTree(content, depth + 1);
+        }
     });
 }
 
-// Стиль одной иконки трея: MinWidth + снятие внутреннего Padding.
-static void ApplyTrayIconStyle(FrameworkElementPtr view) {
+// Стиль одной иконки трея: MinWidth ячейки + снятие внутреннего Padding.
+static void ApplyTrayIconViewStyle(FrameworkElementPtr view, int width) {
     if (!view) return;
-    int width = TrayCellWidth();
     try {
         view.MinWidth(width);
-        auto child = view;
-        if ((child = FindChildByName(child, L"ContainerGrid")) &&
-            (child = FindChildByName(child, L"ContentPresenter")) &&
-            (child = FindChildByName(child, L"ContentGrid"))) {
-            EnumChildElements(child, [](FrameworkElementPtr c) {
+    } catch (...) {
+    }
+    // Внутренний Padding контента снимаем: иконка занимает всю ячейку.
+    FrameworkElementPtr child = view;
+    if ((child = FindChildByName(child, L"ContainerGrid")) &&
+        (child = FindChildByName(child, L"ContentPresenter")) &&
+        (child = FindChildByName(child, L"ContentGrid"))) {
+        EnumChildElements(child, [width](FrameworkElementPtr c) {
+            winrt::hstring cls;
+            try {
+                cls = winrt::get_class_name(c);
+            } catch (...) {
+                return;
+            }
+            bool isIconContent = cls == L"SystemTray.TextIconContent" ||
+                                 cls == L"SystemTray.ImageIconContent" ||
+                                 cls == L"SystemTray.LanguageTextIconContent";
+            if (!isIconContent) return;
+            auto inner = FindChildByName(c, L"ContainerGrid");
+            if (inner) SetGridPaddingZero(inner);
+            if (cls == L"SystemTray.LanguageTextIconContent") {
                 try {
-                    auto cls = winrt::get_class_name(c);
-                    if (cls != L"SystemTray.TextIconContent" &&
-                        cls != L"SystemTray.ImageIconContent" &&
-                        cls != L"SystemTray.LanguageTextIconContent") {
-                        return;
-                    }
-                    // Через ABI: consume<> у Grid.Padding не компилируется
-                    // в этом контексте (C3779). IGrid2 ABI имеет put_Padding.
-                    using IGrid2ABI =
-                        winrt::impl::abi<winrt::Windows::UI::Xaml::Controls::IGrid2>::type;
-                    using ThicknessABI = winrt::impl::abi<winrt::Windows::UI::Xaml::Thickness>::type;
-                    auto ig2 = c.try_as<winrt::Windows::UI::Xaml::Controls::IGrid2>();
-                    if (!ig2) return;
-                    auto abi = *(IGrid2ABI**)&ig2;
-                    abi->put_Padding(ThicknessABI{});
+                    c.Width(std::numeric_limits<double>::quiet_NaN());
+                    c.MinWidth(width + 12);
                 } catch (...) {
                 }
-            });
-        }
-    } catch (...) {
+            }
+        });
     }
 }
 
-static void ApplyAllTrayStyles() {
-    int n = (int)g_trayViews.size();
-    for (int i = 0; i < n; i++) {
-        try {
-            ApplyTrayIconStyle(g_trayViews[i]);
-        } catch (...) {
+// Поиск всех иконок уведомлений (класс SystemTray.NotifyIconView) в поддереве:
+// обход идёт и по визуальному дереву, и по содержимому ContentControl —
+// в 24H2 иконки трея лежат именно в Content.
+static void CollectNotifyIconViews(FrameworkElementPtr el, int depth,
+                                   std::vector<FrameworkElementPtr>* out) {
+    if (!el || depth > 12 || !out) return;
+    if (ClassNameOf(el) == L"SystemTray.NotifyIconView") {
+        out->push_back(el);
+        return;
+    }
+    EnumChildElements(el, [&](FrameworkElementPtr c) {
+        CollectNotifyIconViews(c, depth + 1, out);
+    });
+    auto content = GetContentChild(el);
+    if (content) CollectNotifyIconViews(content, depth + 1, out);
+}
+
+// Иконки уведомлений: NotificationAreaIcons -> ... -> NotifyItemIcon.
+static int ApplyTrayNotificationAreaIcons(FrameworkElementPtr notificationAreaIcons,
+                                          int width) {
+    std::vector<FrameworkElementPtr> views;
+    CollectNotifyIconViews(notificationAreaIcons, 0, &views);
+    int applied = 0;
+    for (auto& v : views) {
+        ApplyTrayIconViewStyle(v, width);
+        applied++;
+    }
+    if (applied == 0) {
+        // Запасной путь: искать по имени элемента.
+        auto notify = FindDescendantByName(notificationAreaIcons, L"NotifyItemIcon");
+        if (notify) {
+            ApplyTrayIconViewStyle(notify, width);
+            applied = 1;
         }
     }
-    // Уже созданные иконки трея ищем по дереву XAML (корень берём у панели).
-    if (g_taskbarXamlRoot) {
+    return applied;
+}
+
+// Применить стиль ко всем иконкам трея, найденным в дереве XAML.
+static int ApplyAllTrayStyles() {
+    int applied = 0;
+    int width = TrayCellWidth();
+    for (auto& root : g_taskbarRoots) {
+        FrameworkElementPtr content = nullptr;
         try {
-            auto content = g_taskbarXamlRoot.Content().try_as<FrameworkElementPtr>();
-            if (content) {
-                auto frame = FindChildByClassName(content, L"SystemTray.SystemTrayFrame");
-                if (frame) {
-                    auto grid = FindChildByName(frame, L"SystemTrayFrameGrid");
-                    if (grid) {
-                        auto icons = FindChildByName(grid, L"NotificationAreaIcons");
-                        if (icons) {
-                            int found = 0;
-                            // Иконки лежат в ItemsPresenter → Panel → ContentPresenter.
-                            EnumChildElements(icons, [&](FrameworkElementPtr c) {
-                                auto notify = FindDescendantByName(c, L"NotifyItemIcon");
-                                if (notify) {
-                                    ApplyTrayIconStyle(notify);
-                                    g_trayViews.push_back(notify);
-                                    found++;
-                                }
-                            });
-                            static LONG dumped = 0;
-                            if (InterlockedIncrement(&dumped) <= 2) {
-                                LogLine(L"--- tray tree dump ---");
-                                auto notifyStack = FindChildByName(grid, L"NotifyIconStack");
-                                if (notifyStack) {
-                                    DumpTrayIconTree(notifyStack, 0);
-                                } else {
-                                    DumpTrayIconTree(grid, 0);
-                                }
-                            }
-                            LogLine(L"ApplyAllTrayStyles: %d views, %d from tree, cell=%d", n,
-                                    found, TrayCellWidth());
-                            return;
-                        }
-                    }
-                }
+            // Корень острова (XamlRoot.Content) — система трея лежит его прямым
+            // потомком.
+            content = root.Content().try_as<FrameworkElementPtr>();
+        } catch (...) {
+            content = nullptr;
+        }
+        if (!content) continue;
+        try {
+            auto frame = FindChildByClassName(content, L"SystemTray.SystemTrayFrame");
+            if (!frame) {
+                LogLine(L"tray: SystemTray.SystemTrayFrame not found");
+                continue;
             }
+            auto grid = FindChildByName(frame, L"SystemTrayFrameGrid");
+            if (!grid) {
+                LogLine(L"tray: SystemTrayFrameGrid not found");
+                continue;
+            }
+            auto icons = FindChildByName(grid, L"NotificationAreaIcons");
+            if (!icons) {
+                LogLine(L"tray: NotificationAreaIcons not found");
+                continue;
+            }
+            applied += ApplyTrayNotificationAreaIcons(icons, width);
+
         } catch (...) {
         }
     }
-    LogLine(L"ApplyAllTrayStyles: %d views, cell=%d", n, TrayCellWidth());
+    static int lastApplied = -1;
+    static int lastWidth = -1;
+    if (applied != lastApplied || width != lastWidth) {
+        lastApplied = applied;
+        lastWidth = width;
+        LogLine(L"ApplyAllTrayStyles: applied=%d cell=%d roots=%d", applied, width,
+                (int)g_taskbarRoots.size());
+    }
+    return applied;
+}
+
+// Переприменение стиля трея (вызывается вотчером раз в несколько секунд):
+// оболочка периодически пересобирает область уведомлений и сбрасывает MinWidth.
+void HooksReapplyTrayStyles() {
+    RunOnTaskbarUiThread(+[](void*) { ApplyAllTrayStyles(); }, nullptr);
 }
 
 // Обработчик Loaded: элемент уже в дереве — применяем стиль.
@@ -355,13 +491,20 @@ static void OnTrayIconLoaded(winrt::Windows::Foundation::IInspectable const& sen
     try {
         auto el = sender.try_as<FrameworkElementPtr>();
         if (!el) return;
-        ApplyTrayIconStyle(el);
-        static LONG dumped = 0;
-        if (InterlockedIncrement(&dumped) <= 2) {
+        winrt::hstring cls;
+        try {
+            cls = winrt::get_class_name(el);
+        } catch (...) {
+            return;
+        }
+        int width = TrayCellWidth();
+        if (cls == L"SystemTray.NotifyIconView") {
+            ApplyTrayIconViewStyle(el, width);
+            LogLine(L"tray icon loaded: class=%s name=%s width=%d", cls.c_str(),
+                    el.Name().c_str(), width);
+        } else {
             try {
-                LogLine(L"tray icon loaded: class=%s name=%s", winrt::get_class_name(el).c_str(),
-                        el.Name().c_str());
-                DumpTrayIconTree(el, 0);
+                el.MinWidth(width);
             } catch (...) {
             }
         }
@@ -369,21 +512,58 @@ static void OnTrayIconLoaded(winrt::Windows::Foundation::IInspectable const& sen
     }
 }
 
-using IconViewCtor_t = void(WINAPI*)(void* self, void* config);
+// Хук конструктора IconView (Taskbar.View.dll) — подписываемся на Loaded
+// каждой новой иконки трея и применяем стиль, когда элемент уже в дереве.
+// Сигнатура как в эталон-моде: IconView::IconView(void), возвращает this.
+using IconViewCtor_t = void*(WINAPI*)(void* self);
 static IconViewCtor_t IconViewCtor_Orig = nullptr;
 
-static void IconViewCtor_Hook(void* self, void* config) {
-    IconViewCtor_Orig(self, config);
+static void* WINAPI IconViewCtor_Hook(void* self) {
+    void* ret = IconViewCtor_Orig(self);
+    static LONG calls = 0;
+    LONG n = InterlockedIncrement(&calls);
     try {
         FrameworkElementPtr el = nullptr;
         ((IUnknown**)self)[1]->QueryInterface(winrt::guid_of<FrameworkElementPtr>(),
                                                winrt::put_abi(el));
-        if (!el) return;
+        if (n <= 10) {
+            LogLine(L"IconViewCtor_Hook call=%ld el=%p class=%s", n,
+                    el ? (void*)winrt::get_abi(el) : nullptr,
+                    el ? ClassNameOf(el).c_str() : L"(null)");
+        }
+        if (!el) return ret;
         g_trayRevokers.emplace_back();
         g_trayRevokers.back() = el.Loaded(winrt::auto_revoke_t{}, &OnTrayIconLoaded);
-        g_trayViews.push_back(el);
     } catch (...) {
+        if (n <= 10) LogLine(L"IconViewCtor_Hook call=%ld threw", n);
     }
+    return ret;
+}
+
+// Хук конструктора NotifyIconView (базовый IconView может быть заинлайнен).
+using NotifyIconViewCtor_t = void*(WINAPI*)(void* self);
+static NotifyIconViewCtor_t NotifyIconViewCtor_Orig = nullptr;
+
+static void* WINAPI NotifyIconViewCtor_Hook(void* self) {
+    void* ret = NotifyIconViewCtor_Orig(self);
+    static LONG calls = 0;
+    LONG n = InterlockedIncrement(&calls);
+    try {
+        FrameworkElementPtr el = nullptr;
+        ((IUnknown**)self)[1]->QueryInterface(winrt::guid_of<FrameworkElementPtr>(),
+                                               winrt::put_abi(el));
+        if (n <= 10) {
+            LogLine(L"NotifyIconViewCtor_Hook call=%ld el=%p class=%s", n,
+                    el ? (void*)winrt::get_abi(el) : nullptr,
+                    el ? ClassNameOf(el).c_str() : L"(null)");
+        }
+        if (!el) return ret;
+        g_trayRevokers.emplace_back();
+        g_trayRevokers.back() = el.Loaded(winrt::auto_revoke_t{}, &OnTrayIconLoaded);
+    } catch (...) {
+        if (n <= 10) LogLine(L"NotifyIconViewCtor_Hook call=%ld threw", n);
+    }
+    return ret;
 }
 
 // ---------------------------------------------------------------- выполнение на UI-потоке
@@ -538,6 +718,7 @@ static winrt::Windows::Foundation::IInspectable* WINAPI Lookup_Hook(
     if (!ret) return ret;
     const auto keyString = key->try_as<winrt::hstring>();
     if (!keyString) return ret;
+
     double want = (double)TaskbarButtonExtent();
     if (*keyString == L"MediumTaskbarButtonExtent" ||
         *keyString == L"SmallTaskbarButtonExtent") {
@@ -574,9 +755,17 @@ static void* WINAPI GetMetrics_Hook(void* pThis, void* metrics) {
                 winrt::guid_of<winrt::Windows::UI::Xaml::FrameworkElement>(),
                 winrt::put_abi(frameElement))) &&
             frameElement) {
-            if (!g_taskbarXamlRoot) {
-                g_taskbarXamlRoot = frameElement.XamlRoot();
-                LogLine(L"captured taskbar XamlRoot");
+            try {
+                auto root = frameElement.XamlRoot();
+                bool known = false;
+                for (auto& r : g_taskbarRoots) {
+                    if (r == root) { known = true; break; }
+                }
+                if (!known) {
+                    g_taskbarRoots.push_back(root);
+                    LogLine(L"captured taskbar XamlRoot #%d", (int)g_taskbarRoots.size());
+                }
+            } catch (...) {
             }
             if (ApplyingNow()) {
                 LONG n = InterlockedIncrement(&g_hookCalls);
@@ -847,12 +1036,21 @@ static void RefreshTaskbarLayout() {
     LogLine(L"RefreshTaskbarLayout start hwnd=%p height=%d icon=%d btn=%d tray=%d", (void*)hTaskbarWnd,
             target, g_live.iconSize.load(), g_live.buttonWidth.load(), g_live.trayIconSize.load());
 
+    HWND hMSTaskSwWClass = FindMSTaskSwWClass(hTaskbarWnd);
+
+    // Оболочка пересчитывает метрики только если фактическая высота изменилась.
+    // Поэтому сначала показываем высоту на 1 px меньше (панель мигнёт на кадр),
+    // ждём пересчёта XAML-острова и возвращаем целевую высоту. Побочный эффект
+    // полезен: после пересчёта мы получаем корневой элемент дерева XAML,
+    // из которого ищем область уведомлений (трей).
     g_live.height.store(target - 1, std::memory_order_relaxed);
     SendMessageW(hTaskbarWnd, WM_SETTINGCHANGE, SPI_SETLOGICALDPIOVERRIDE, 0);
+    if (hMSTaskSwWClass) SendMessageW(hMSTaskSwWClass, 0x452, 3, 0);
+    Sleep(200);
+
     g_live.height.store(target, std::memory_order_relaxed);
     SendMessageW(hTaskbarWnd, WM_SETTINGCHANGE, SPI_SETLOGICALDPIOVERRIDE, 0);
 
-    HWND hMSTaskSwWClass = FindMSTaskSwWClass(hTaskbarWnd);
     if (hMSTaskSwWClass) {
         SendMessageW(hMSTaskSwWClass, 0x452, 3, 0);
         LogLine(L"RefreshTaskbarLayout sent 0x452 to MSTaskSwWClass=%p", (void*)hMSTaskSwWClass);
@@ -1033,6 +1231,8 @@ bool InstallHooks(HMODULE /*unused*/, const PanelConfig& cfg) {
                      (void**)&UpdateVisualStates_Orig);
     ok |= InstallOne(g_viewNt, g_viewBase, "IconViewCtor", kRvaIconViewCtor,
                      (void*)IconViewCtor_Hook, (void**)&IconViewCtor_Orig);
+    ok |= InstallOne(g_viewNt, g_viewBase, "NotifyIconViewCtor", kRvaNotifyIconViewCtor,
+                     (void*)NotifyIconViewCtor_Hook, (void**)&NotifyIconViewCtor_Orig);
 
     g_live.height.store(cfg.taskbarHeight, std::memory_order_relaxed);
     g_live.iconSize.store(cfg.iconSize, std::memory_order_relaxed);
@@ -1066,6 +1266,7 @@ void RemoveHooks() {
         {g_viewNt, g_viewBase, kRvaUpdateIconColumnDefinition, "UpdateIconColumnDefinition"},
         {g_viewNt, g_viewBase, kRvaUpdateVisualStates, "UpdateVisualStates"},
         {g_viewNt, g_viewBase, kRvaIconViewCtor, "IconViewCtor"},
+        {g_viewNt, g_viewBase, kRvaNotifyIconViewCtor, "NotifyIconViewCtor"},
     };
     for (const Item& it : items) {
         if (!it.nt || !it.base) continue;
