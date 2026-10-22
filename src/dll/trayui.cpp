@@ -8,6 +8,7 @@
 namespace {
 
 constexpr UINT kWmTrayIcon = WM_APP + 101;
+constexpr UINT kWmShowPopup = WM_APP + 102;
 constexpr UINT kTrayIconId = 0x5A1;
 constexpr int kIconPx = 16;
 
@@ -32,6 +33,8 @@ struct TrayState {
 };
 static TrayState g_tray;
 static CRITICAL_SECTION g_trayLock;
+// Сигнал «окно иконки создано» — поток ожидает его перед первым показом панели.
+static HANDLE g_trayReady = nullptr;
 static bool g_lockInit = false;
 
 static void LockInit() {
@@ -161,17 +164,33 @@ static void PlacePopup(HWND popup) {
                  SWP_SHOWWINDOW | SWP_NOACTIVATE);
 }
 
+// toggle=true — по клику по иконке (показать/скрыть), false — показать (извне).
+static void ShowPopupNow(bool toggle) {
+    if (g_tray.popup && IsWindowVisible(g_tray.popup)) {
+        if (toggle) {
+            ShowWindow(g_tray.popup, SW_HIDE);
+            return;
+        }
+        SetForegroundWindow(g_tray.popup);
+        return;
+    }
+    if (g_tray.popup) {
+        RefreshEdits();
+        PlacePopup(g_tray.popup);
+        SetForegroundWindow(g_tray.popup);
+    }
+}
+
 static LRESULT CALLBACK NotifyWndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
+    if (msg == kWmShowPopup) {
+        // Запрос «показать панель» извне (например, двойной клик по ярлыку).
+        ShowPopupNow(false);
+        return 0;
+    }
     if (msg == kWmTrayIcon) {
         UINT ev = LOWORD(lp);
         if (ev == WM_LBUTTONUP || ev == WM_RBUTTONUP) {
-            if (g_tray.popup && IsWindowVisible(g_tray.popup)) {
-                ShowWindow(g_tray.popup, SW_HIDE);
-            } else if (g_tray.popup) {
-                RefreshEdits();
-                PlacePopup(g_tray.popup);
-                SetForegroundWindow(g_tray.popup);
-            }
+            ShowPopupNow(true);
         }
         return 0;
     }
@@ -278,8 +297,15 @@ static DWORD WINAPI TrayThread(LPVOID param) {
     wp.lpszClassName = L"s-panel-popup";
     RegisterClassW(&wp);
 
-    g_tray.notifyWnd =
-        CreateWindowExW(0, L"s-panel-tray", L"s-panel", 0, 0, 0, 0, 0, HWND_MESSAGE, nullptr, hi, nullptr);
+    // Окно-владелец иконки: обычное скрытое top-level окно. HWND_MESSAGE
+    // (message-only) в Win11 24H2 современная область уведомлений игнорирует —
+    // иконка «добавляется», но в трее не видна.
+    g_tray.notifyWnd = CreateWindowExW(WS_EX_TOOLWINDOW, L"s-panel-tray", L"s-panel",
+                                       WS_POPUP, 0, 0, 0, 0, nullptr, nullptr, hi, nullptr);
+    if (!g_tray.notifyWnd) {
+        LogLine(L"TrayUi: notify window creation failed GLE=%lu", GetLastError());
+    }
+    if (g_trayReady) SetEvent(g_trayReady);
 
     g_tray.popup = CreateWindowExW(WS_EX_TOPMOST | WS_EX_TOOLWINDOW, L"s-panel-popup", L"s-panel",
                                    WS_POPUP | WS_CAPTION | WS_SYSMENU, 0, 0, 300, 280, nullptr,
@@ -361,6 +387,8 @@ bool TrayUiStart(const wchar_t* cfgPath, TrayApplyFn applyFn) {
         return true;
     }
     g_tray.applyFn = applyFn;
+    if (!g_trayReady) g_trayReady = CreateEventW(nullptr, TRUE, FALSE, nullptr);
+    if (g_trayReady) ResetEvent(g_trayReady);
     std::wstring* p = new std::wstring(cfgPath ? cfgPath : L"");
     g_tray.thread = CreateThread(nullptr, 0, TrayThread, p, 0, &g_tray.threadId);
     bool ok = g_tray.thread != nullptr;
@@ -379,6 +407,18 @@ void TrayUiNoteExternalChange(const PanelConfig& cfg) {
     LogLine(L"TrayUiNoteExternalChange h=%d", cfg.taskbarHeight);
 }
 
+// Показать панель настроек: запрос уходит в поток трея (владелец окон).
+void TrayUiShowPopup() {
+    if (!g_tray.notifyWnd && g_trayReady) {
+        // Поток трея ещё создаёт окно — подождём.
+        WaitForSingleObject(g_trayReady, 5000);
+    }
+    if (!g_tray.notifyWnd) {
+        LogLine(L"TrayUiShowPopup: notify window is null");
+        return;
+    }
+    PostMessageW(g_tray.notifyWnd, WM_APP + 102, 0, 0);
+}
 void TrayUiStop() {
     LockInit();
     EnterCriticalSection(&g_trayLock);

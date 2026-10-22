@@ -30,6 +30,15 @@ int wmain(int argc, wchar_t** argv) {
     printf("loaded, sleeping 1s for InitThread...\n");
     Sleep(1000);
 
+    // Экспорт отката: loader.exe --uninstall вызывает SpanelUninstall удалённо.
+    // Без него откат деградирует до голого FreeLibrary (без снятия хуков).
+    if (!GetProcAddress(m, "SpanelUninstall")) {
+        printf("FAIL: SpanelUninstall export missing\n");
+        FreeLibrary(m);
+        return 1;
+    }
+    printf("SpanelUninstall export present\n");
+
     FreeCtx ctx{m, FALSE, 0};
     HANDLE th = CreateThread(nullptr, 0, FreeThread, &ctx, 0, nullptr);
     if (!th) {

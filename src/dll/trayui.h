@@ -16,6 +16,9 @@ bool TrayUiStart(const wchar_t* cfgPath, TrayApplyFn applyFn);
 // Гасит иконку, останавливает поток, уничтожает окна. Идемпотентно.
 void TrayUiStop();
 
+// Показать панель настроек (из внешнего потока — безопасно, через PostMessage).
+void TrayUiShowPopup();
+
 // Обновить кэшированный конфиг после внешнего изменения (файл правил вручную).
 // Не пишет на диск и не вызывает applyFn — только обновляет поля в UI.
 void TrayUiNoteExternalChange(const PanelConfig& cfg);

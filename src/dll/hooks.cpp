@@ -598,7 +598,10 @@ static void RunOnTaskbarUiThread(void (*fn)(void*), void* param) {
     if (!g_uiThreadMsg) g_uiThreadMsg = RegisterWindowMessageW(L"s-panel-run-on-ui");
     HHOOK hook = SetWindowsHookExW(WH_CALLWNDPROC, UiThreadHookProc, nullptr, tid);
     if (!hook) {
-        LogLine(L"RunOnTaskbarUiThread: SetWindowsHookEx failed GLE=%lu", GetLastError());
+        // Панели задач может быть ещё нет (оболочка поднимается) — не спамим лог.
+        static LONG fails = 0;
+        if (InterlockedIncrement(&fails) <= 3)
+            LogLine(L"RunOnTaskbarUiThread: SetWindowsHookEx failed GLE=%lu", GetLastError());
         return;
     }
     g_uiTask.store(fn, std::memory_order_relaxed);

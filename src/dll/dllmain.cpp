@@ -152,6 +152,16 @@ static DWORD WINAPI InitThread(LPVOID) {
     LogLine(L"cfg height=%d icon=%d btn=%d tray=%d", cfg.taskbarHeight, cfg.iconSize,
             cfg.taskbarButtonWidth, cfg.trayIconSize);
 
+    // Оболочка могла подниматься заново: Taskbar.View.dll (модуль с XAML-панелью)
+    // появляется не сразу. Без него хуки ставить не во что — ждём до 30 с.
+    for (int i = 0; i < 120 && !GetModuleHandleW(L"Taskbar.View.dll"); i++) {
+        if (i == 0) LogLine(L"waiting for Taskbar.View.dll...");
+        Sleep(250);
+    }
+    if (!GetModuleHandleW(L"Taskbar.View.dll")) {
+        LogLine(L"Taskbar.View.dll not loaded after 30s, no-op");
+    }
+
     HMODULE taskbar = GetModuleHandleW(L"Taskbar.dll");
     LogLine(L"GetModuleHandle(Taskbar.dll)=%p", (void*)taskbar);
     bool ok = taskbar && InstallHooks(taskbar, cfg);
@@ -176,4 +186,13 @@ BOOL APIENTRY DllMain(HMODULE hModule, DWORD reason, LPVOID) {
         LogLine(L"DLL_PROCESS_DETACH");
     }
     return TRUE;
+}
+
+// Экспорт для отката: loader.exe --uninstall вызывает его удалённо —
+// снимает хуки и останавливает потоки DLL до выгрузки.
+extern "C" __declspec(dllexport) void __cdecl SpanelUninstall(void) {
+    LogLine(L"SpanelUninstall called");
+    StopWatcher();
+    RemoveHooks();
+    LogLine(L"SpanelUninstall done");
 }

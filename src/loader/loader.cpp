@@ -113,6 +113,29 @@ static HMODULE FindRemoteModule(DWORD pid, const std::wstring& dllPath) {    // 
     return found;
 }
 
+// Ждём, пока оболочка поднимет Taskbar.View.dll (модуль XAML-панели). Без него
+// хуки в DLL не ставятся, поэтому инжек делаем только после его появления.
+static bool WaitForTaskbarView(DWORD pid, DWORD timeoutMs) {
+    for (DWORD waited = 0; waited <= timeoutMs; waited += 500) {
+        HANDLE snap = CreateToolhelp32Snapshot(TH32CS_SNAPMODULE | TH32CS_SNAPMODULE32, pid);
+        if (snap != INVALID_HANDLE_VALUE) {
+            MODULEENTRY32W me{};
+            me.dwSize = sizeof(me);
+            if (Module32FirstW(snap, &me)) {
+                do {
+                    if (_wcsicmp(me.szModule, L"Taskbar.View.dll") == 0) {
+                        CloseHandle(snap);
+                        return true;
+                    }
+                } while (Module32NextW(snap, &me));
+            }
+            CloseHandle(snap);
+        }
+        Sleep(500);
+    }
+    return false;
+}
+
 static DWORD ExportRva(const wchar_t* dllFile, const char* name) {
     HANDLE f = CreateFileW(dllFile, GENERIC_READ, FILE_SHARE_READ, nullptr, OPEN_EXISTING,
                            FILE_ATTRIBUTE_NORMAL, nullptr);
@@ -260,10 +283,38 @@ static BOOL WINAPI TrayCtrlHandler(DWORD type) {
     return FALSE;
 }
 
+// Именованное событие «показать панель»: позволяет двойным кликом по ярлыку
+// открыть панель настроек, не поднимая вторую копию трея.
+static const wchar_t* kShowPopupEvent = L"Local\\s-panel-show-popup";
+
+// Поток-слушатель: ждёт сигнала и просит поток трея показать панель.
+static DWORD WINAPI ShowPopupWaitThread(LPVOID param) {
+    // Ручку события передаём извне: OpenEventW без SYNCHRONIZE не даёт ждать.
+    HANDLE ev = (HANDLE)param;
+    if (!ev) return 0;
+    for (;;) {
+        DWORD w = WaitForSingleObject(ev, INFINITE);
+        if (w != WAIT_OBJECT_0) break;
+        ResetEvent(ev);
+        LogLine(L"loader: show-popup signal received");
+        TrayUiShowPopup();
+        LogLine(L"loader: show-popup requested");
+    }
+    return 0;
+}
+
 // Постоянный режим: иконка в трее + попап настроек. Пишет config.ini,
 // DLL в explorer подхватывает изменения вотчером (applyFn=null — применение
 // идёт через файл, а не прямым вызовом).
-static int RunTray() {
+static int RunTray(bool showPopup) {
+    // Если демон уже работает — сигналим ему и выходим.
+    HANDLE ev = CreateEventW(nullptr, TRUE, FALSE, kShowPopupEvent);
+    if (ev && GetLastError() == ERROR_ALREADY_EXISTS) {
+        SetEvent(ev);
+        CloseHandle(ev);
+        wprintf(L"s-panel already running, popup requested\n");
+        return 0;
+    }
     wchar_t exe[MAX_PATH]{};
     GetModuleFileNameW(nullptr, exe, MAX_PATH);
     std::wstring ini = exe;
@@ -278,6 +329,17 @@ static int RunTray() {
         return 2;
     }
     wprintf(L"s-panel tray running (config=%s). Ctrl+C to stop.\n", ini.c_str());
+    if (ev) {
+        HANDLE th = CreateThread(nullptr, 0, ShowPopupWaitThread, ev, 0, nullptr);
+        if (th) CloseHandle(th);
+        LogLine(L"loader: show-popup waiter started, wantPopup=%d", (int)showPopup);
+        if (showPopup) {
+            SetEvent(ev);
+            LogLine(L"loader: show-popup event set");
+        }
+    } else {
+        LogLine(L"loader: show-popup event creation failed GLE=%lu", GetLastError());
+    }
     g_trayExit = CreateEventW(nullptr, TRUE, FALSE, nullptr);
     SetConsoleCtrlHandler(TrayCtrlHandler, TRUE);
     WaitForSingleObject(g_trayExit, INFINITE);
@@ -316,6 +378,10 @@ int wmain(int argc, wchar_t** argv) {
         if (FindRemoteModule(pid, DllPathNextToExe())) {
             wprintf(L"taskbar.dll already loaded in explorer, skip inject\n");
             return 0;
+        }
+        if (!WaitForTaskbarView(pid, 30000)) {
+            wprintf(L"Taskbar.View.dll not loaded in explorer after 30s, abort\n");
+            return 2;
         }
         return Inject(pid, DllPathNextToExe()) ? 0 : 2;
     }
@@ -375,8 +441,12 @@ int wmain(int argc, wchar_t** argv) {
         return rc == 0 ? 0 : 2;
     }
 
+    bool wantPopup = false;
+    for (int i = 2; i < argc; i++) {
+        if (std::wstring(argv[i]) == L"--show-popup") wantPopup = true;
+    }
     if (cmd == L"--tray") {
-        return RunTray();
+        return RunTray(wantPopup);
     }
     if (cmd == L"--inject-and-tray") {
         if (!pid) {
@@ -388,14 +458,19 @@ int wmain(int argc, wchar_t** argv) {
             return 1;
         }
         if (!FindRemoteModule(pid, DllPathNextToExe())) {
+            if (!WaitForTaskbarView(pid, 30000)) {
+                wprintf(L"Taskbar.View.dll not loaded in explorer after 30s, abort\n");
+                return 2;
+            }
             if (!Inject(pid, DllPathNextToExe())) return 2;
         } else {
             wprintf(L"taskbar.dll already loaded in explorer, skip inject\n");
         }
-        return RunTray();
+        return RunTray(wantPopup);
     }
     wprintf(L"commands: --check --inject --uninstall\n"
             L"          --tray (tray icon only) --inject-and-tray\n"
-            L"          --install [--with-autostart] --uninstall-task\n");
+            L"          --install [--with-autostart] --uninstall-task\n"
+            L"          (--show-popup: открыть панель настроек сразу)\n");
     return 3;
 }
