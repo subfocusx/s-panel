@@ -67,6 +67,7 @@ static DWORD WINAPI WatchThread(LPVOID) {
     std::wstring path = CurrentConfigPath();
     PanelConfig last{};
     int tick = 0;
+    int settle = 0;
     ReadPanelConfig(path.c_str(), &last);
 
     for (;;) {
@@ -98,6 +99,15 @@ static DWORD WINAPI WatchThread(LPVOID) {
                     cfg.taskbarIconSpacing, cfg.trayIconSpacing);
             last = cfg;
             ApplyPanelConfig(cfg);
+            // Оболочка перекладывает остров XAML не сразу: пересчёт отложен до
+            // следующего кадра, и рамка лотка у вторичных панелей на это время
+            // возвращается к заводской высоте. Поэтому ещё пару секунд
+            // переприменяем стиль — иначе часы на секунды «уезжают».
+            settle = 8;
+        }
+        if (settle > 0) {
+            HooksReapplyTrayStyles();
+            --settle;
         }
     }
     LogLine(L"WatchThread exit");

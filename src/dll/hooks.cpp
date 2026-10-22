@@ -433,11 +433,29 @@ static int ApplyTrayNotificationAreaIcons(FrameworkElementPtr notificationAreaIc
     return applied;
 }
 
+// Рамка системного лотка. Оболочка задаёт её высоту только основной панели:
+// у вторичных панелей (Shell_SecondaryTrayWnd) остаётся заводная (48 px), и блок
+// часов центрируется по этой рамке — из-за этого на разных мониторах часы стоят
+// на разной высоте (на вторичной ниже на (48 - H)/2 px). Ставим рамке нашу
+// высоту — тогда часы встают одинаково.
+static void AlignTrayFrameHeight(FrameworkElementPtr frame, int target, int rootIdx) {
+    if (!frame) return;
+    try {
+        double ah = frame.ActualHeight();
+        if (ah > (double)target + 0.5) {
+            frame.Height((double)target);
+            LogLine(L"tray frame root#%d height %.2f -> %d", rootIdx, ah, target);
+        }
+    } catch (...) {
+    }
+}
+
 // Применить стиль ко всем иконкам трея, найденным в дереве XAML.
 static int ApplyAllTrayStyles() {
     int applied = 0;
     int width = TrayCellWidth();
-    for (auto& root : g_taskbarRoots) {
+    for (size_t i = 0; i < g_taskbarRoots.size(); ++i) {
+        auto& root = g_taskbarRoots[i];
         FrameworkElementPtr content = nullptr;
         try {
             // Корень острова (XamlRoot.Content) — система трея лежит его прямым
@@ -453,6 +471,8 @@ static int ApplyAllTrayStyles() {
                 LogLine(L"tray: SystemTray.SystemTrayFrame not found");
                 continue;
             }
+            // Рамка лотка у вторичных панелей осталась заводской — выравниваем.
+            AlignTrayFrameHeight(frame, g_live.height.load(std::memory_order_relaxed), (int)i);
             auto grid = FindChildByName(frame, L"SystemTrayFrameGrid");
             if (!grid) {
                 LogLine(L"tray: SystemTrayFrameGrid not found");
